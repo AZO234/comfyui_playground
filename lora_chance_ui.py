@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""lora_chance_ui.py - LoRA 選択確率の対話的確認 TUI (comfyui_playground 用)。
+
+`pick_n_loras_by_keywords` を N 回 (規定 300) 回して、選ばれた LoRA の Top 30 を
+バーグラフ表示する。LoRA 採用バイアスや keyword マッチ範囲のデバッグに使う。
+
+機能 (3 モード):
+    - random       : prompt.toml の語句をランダムに選択 (build_prompt を毎回回す)
+    - manual       : prompt.toml の各セクションをユーザが対話選択 (矢印+Enter)
+    - lora_keyword : LoRA キーワードをカンマ区切りで直接入力
+
+使い方:
+    python lora_chance_ui.py
+    python lora_chance_ui.py --trials 500 --top 50
+
+依存: questionary (pip install questionary)
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from collections import Counter
+from pathlib import Path
+
+# Windows console での絵文字 / 全角落ち防止
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+import questionary
+
+from common import (
+    build_lora_corpus,
+    build_prompt,
+    load_prompt_config,
+    pick_n_loras_by_keywords,
+)
+
+# --------------------------------------------------------------------------- #
+# 定数
+# --------------------------------------------------------------------------- #
+ROOT               = Path(__file__).parent
+LORA_DIR           = ROOT / "2_2_LoRA"
+LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
+
+
+# --------------------------------------------------------------------------- #
+# LoRA_keywords.toml ローダ + corpus 構築 (generate.py と同じ実装)
+# --------------------------------------------------------------------------- #
+def load_lora_keywords_toml() -> dict:
+    if not LORA_KEYWORDS_TOML.exists():
+        return {}
+    try:
+        return tomllib.loads(LORA_KEYWORDS_TOML.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[警告] LoRA_keywords.toml パース失敗 ({e})", flush=True)
+        return {}
+
+
+def build_lora_corpus_for_playground(loras: list[Path], kw_data: dict) -> dict[str, str]:
+    """common.build_lora_corpus への薄いアダプタ (keyword → trigger 名前変換)。"""
+    adapter = {
+        stem: {"trigger": str((entry or {}).get("keyword") or "")}
+        for stem, entry in kw_data.items()
+    }
+    return build_lora_corpus(loras, adapter)
+
+
+# --------------------------------------------------------------------------- #
+# prompt.toml の who エントリから kw を取り出すヘルパ (v01/v02/v03 後方互換)
+# --------------------------------------------------------------------------- #
+def get_entry_keywords(entry: list, section: str) -> list[str]:
+    """エントリの kw フィールドを atomic kw list で返す。
+
+    who: [char, has_motion, has_wearing?, has_where?, kw?]  (型で判別)
+    その他: [value, weight, kw?]
+    """
+    if section == "who":
+        kw_str = ""
+        # 5 要素 (v03): [char, has_motion, has_wearing, has_where, kw]
+        if len(entry) >= 5 and isinstance(entry[2], bool) and isinstance(entry[3], bool):
+            kw_str = str(entry[4] or "")
+        # 4 要素 (v02): [char, has_motion, has_wearing, kw]
+        elif len(entry) >= 4 and isinstance(entry[2], bool):
+            kw_str = str(entry[3] or "")
+        # 3 要素 (v01): [char, has_motion, kw]
+        elif len(entry) >= 3 and isinstance(entry[2], str):
+            kw_str = str(entry[2] or "")
+    else:
+        # wearing / with_items / motion: [value, weight, kw?]
+        kw_str = str(entry[2] or "") if len(entry) >= 3 else ""
+
+    return [k.strip() for k in kw_str.split(",") if k.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# 抽選試行
+# --------------------------------------------------------------------------- #
+def run_trials(loras: list[Path], corpus: dict, keywords: list[str],
+                n_trials: int, n_max: int = 3) -> Counter:
+    counter: Counter = Counter()
+    for _ in range(n_trials):
+        picked = pick_n_loras_by_keywords(loras, keywords, corpus, n_max=n_max)
+        for p in picked:
+            counter[p.stem] += 1
+    return counter
+
+
+# --------------------------------------------------------------------------- #
+# 結果表示 (Top N バーグラフ)
+# --------------------------------------------------------------------------- #
+def display_top(counter: Counter, n_top: int, n_trials: int) -> None:
+    if not counter:
+        print("\n(no picks)")
+        return
+    total_picks = sum(counter.values())
+    max_count = counter.most_common(1)[0][1]
+    bar_width = 40
+    avg_n = total_picks / n_trials
+    print(f"\n=== Top {n_top} of {len(counter)} unique LoRAs ===")
+    print(f"trials={n_trials}, picks={total_picks} (avg {avg_n:.2f} LoRA/trial)\n")
+    for stem, count in counter.most_common(n_top):
+        pct = 100 * count / n_trials
+        bar_len = max(1, int(count / max_count * bar_width))
+        bar = "#" * bar_len
+        print(f"  {count:>4} ({pct:>5.1f}%) {bar:<{bar_width}} {stem}")
+
+
+# --------------------------------------------------------------------------- #
+# モード: random
+# --------------------------------------------------------------------------- #
+def mode_random(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+    """build_prompt をランダムに回して、その都度の lora_keywords で抽選を蓄積。"""
+    counter: Counter = Counter()
+    for _ in range(n_trials):
+        _pos, _neg, kws = build_prompt(cfg)
+        picked = pick_n_loras_by_keywords(loras, kws, corpus, n_max=3)
+        for p in picked:
+            counter[p.stem] += 1
+    return counter
+
+
+# --------------------------------------------------------------------------- #
+# モード: manual
+# --------------------------------------------------------------------------- #
+def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+    """各セクションをユーザ選択 → 集めた kw で抽選。"""
+    sections = [
+        ("who",        cfg.get("who") or []),
+        ("wearing",    cfg.get("wearing") or []),
+        ("with_items", cfg.get("with_items") or []),
+        ("motion",     cfg.get("motion") or []),
+    ]
+    all_kws: list[str] = []
+    selected_summary: list[str] = []
+    for sec_name, entries in sections:
+        if not entries:
+            continue
+        labels: list[str] = ["(このセクションをスキップ)"]
+        kws_per_label: list[list[str]] = [[]]
+        for ent in entries:
+            value = str(ent[0])
+            kws = get_entry_keywords(ent, sec_name)
+            tag = f"  [kw: {', '.join(kws)}]" if kws else "  [kw 無し]"
+            labels.append(f"{value}{tag}")
+            kws_per_label.append(kws)
+        choice = questionary.select(
+            f"[{sec_name}] を選択 (Enter で次へ):",
+            choices=labels, default=labels[0],
+        ).ask()
+        if choice is None:
+            return Counter()  # キャンセル
+        idx = labels.index(choice)
+        if idx > 0:
+            all_kws.extend(kws_per_label[idx])
+            selected_summary.append(f"[{sec_name}] {entries[idx-1][0]}")
+    if selected_summary:
+        print("\n選択:")
+        for s in selected_summary:
+            print(f"  {s}")
+    print(f"  → 集約 kw: {', '.join(all_kws) if all_kws else '(空)'}")
+    return run_trials(loras, corpus, all_kws, n_trials=n_trials)
+
+
+# --------------------------------------------------------------------------- #
+# モード: lora_keyword
+# --------------------------------------------------------------------------- #
+def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+    """ユーザ入力 kw 文字列で抽選。"""
+    text = questionary.text(
+        "LoRA キーワードをカンマ区切りで入力 (空 = キャンセル):",
+    ).ask()
+    if not text:
+        return Counter()
+    kws = [k.strip() for k in text.split(",") if k.strip()]
+    print(f"\n入力 kw: {', '.join(kws)}")
+    return run_trials(loras, corpus, kws, n_trials=n_trials)
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser(description="LoRA 選択確率の対話的確認 TUI")
+    ap.add_argument("--trials", type=int, default=300,
+                    help="抽選試行回数 (既定 300)")
+    ap.add_argument("--top", type=int, default=30,
+                    help="バーグラフに表示する上位件数 (既定 30)")
+    args = ap.parse_args()
+
+    print("LoRA 列挙中...", end=" ", flush=True)
+    loras = sorted(LORA_DIR.glob("*.safetensors"))
+    print(f"{len(loras)} 件")
+    if not loras:
+        raise SystemExit(f"{LORA_DIR} に LoRA がありません")
+
+    print("LoRA_keywords.toml + corpus 構築...", end=" ", flush=True)
+    kw_data = load_lora_keywords_toml()
+    corpus = build_lora_corpus_for_playground(loras, kw_data)
+    print(f"({len(kw_data)} 件登録)")
+
+    cfg = load_prompt_config()
+
+    MODES = {
+        "random       (prompt.toml をランダム抽選で 300 回)":   "random",
+        "manual       (prompt.toml の各セクションをユーザ選択)": "manual",
+        "lora_keyword (LoRA キーワードを直接入力)":              "lora_keyword",
+        "終了":                                                  None,
+    }
+
+    while True:
+        print()
+        choice = questionary.select(
+            "モード選択 (↑↓ + Enter):",
+            choices=list(MODES.keys()),
+        ).ask()
+        if choice is None or MODES[choice] is None:
+            print("終了")
+            return
+        mode = MODES[choice]
+        if mode == "random":
+            counter = mode_random(cfg, loras, corpus, n_trials=args.trials)
+        elif mode == "manual":
+            counter = mode_manual(cfg, loras, corpus, n_trials=args.trials)
+        else:  # lora_keyword
+            counter = mode_lora_keyword(loras, corpus, n_trials=args.trials)
+        display_top(counter, n_top=args.top, n_trials=args.trials)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print("\n中断")
+        sys.exit(0)

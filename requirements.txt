@@ -1,0 +1,47 @@
+# PyTorch は環境に合わせて個別にインストールする (この requirements には含めない)
+#   CPU 版 :  pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
+#   CUDA12 :  pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+#   CUDA13 :  pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+# 参照: https://pytorch.org/get-started/locally/
+
+# Diffusers / Transformers (生成・LoRA 学習・Latent Upscale 全般)
+# transformers 5.x は CLIPTextModel.text_model の API が変わり diffusers 0.38 の from_single_file が壊れる
+# (Cannot find 'text_model' attribute) ため、当面 4.x 系に固定
+diffusers
+transformers>=4.46,<5.0
+accelerate
+safetensors
+huggingface-hub
+peft
+
+# 画像 / 数値 / プログレス
+Pillow
+numpy
+tqdm
+
+# 設定ファイル (Python 3.11+ は tomllib 標準。互換用に tomli/tomli-w)
+tomli
+tomli-w
+
+# プロンプト重み付けパーサ ((word:1.3) 構文を embeddings に変換)
+# normalize_emphasis が `**word**` → `(word:1.3)` 形式で吐き、compel が CLIP 埋め込みに重みを適用
+compel
+
+# タグ付け (WD14 tagger を ONNX で実行)
+# onnxruntime-gpu は CPU バックエンドも含む上位互換。GPU 無し環境では CPUExecutionProvider に自動フォールバック
+onnxruntime-gpu
+
+# アップスケール (Real-ESRGAN を spandrel 経由で実行)
+spandrel
+
+# ADetailer (顔/手の YOLO 検出 + 部分 img2img)
+# generate.py --adetailer 時のみ必要。重み (face/hand_yolov8n.pt) は Bingsu/adetailer から HF 経由で初回 DL
+ultralytics
+
+# 対話 TUI (lora_chance_ui.py で矢印+Space 選択を出すために使用)
+# prompt_toolkit ベース、軽量。CLI 版 (lora_chance.py) は不要
+questionary
+
+# ControlNet 前処理 (canny / depth / softedge / seg / openpose 等の image transform)
+# highrender.py --controlnet-mode で使用。各検出器は初回呼び出しで HF からモデル DL + キャッシュ
+controlnet_aux
