@@ -216,3 +216,37 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AI
+.claude/
+.codex/
+.gemini/
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+AI.md
+MEMORY.md
+
+# project
+ComfyUI/
+1_prompts/
+!1_prompts/put PNG picture(included prompt).txt
+2_tensors/
+!2_tensors/put tensors.txt
+2_1_checkpoint/
+!2_1_checkpoint/output checkpoint tensors.txt
+2_2_LoRA/
+!2_2_LoRA/output LoRA tensors.txt
+2_3_Embedding/
+!2_3_Embedding/output Embedding tensors.txt
+2_4_ControlNet/
+!2_4_ControlNet/output ControlNet tensors.txt
+2_8_SD15/
+!2_8_SD15/output for SD15 tensors.txt
+2_9_error/
+!2_9_error/output error tensors.txt
+3_1_generated/
+!3_1_generated/output generated PNG picture(included prompt).txt
+3_2_upscaled/
+!3_2_upscaled/output upscaled PNG picture(included prompt).txt
+tensors_cache.toml
