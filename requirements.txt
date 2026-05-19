@@ -31,17 +31,16 @@ compel
 # onnxruntime-gpu は CPU バックエンドも含む上位互換。GPU 無し環境では CPUExecutionProvider に自動フォールバック
 onnxruntime-gpu
 
-# アップスケール (Real-ESRGAN を spandrel 経由で実行)
-spandrel
-
-# ADetailer (顔/手の YOLO 検出 + 部分 img2img)
-# generate.py --adetailer 時のみ必要。重み (face/hand_yolov8n.pt) は Bingsu/adetailer から HF 経由で初回 DL
-ultralytics
-
 # 対話 TUI (lora_chance_ui.py で矢印+Space 選択を出すために使用)
 # prompt_toolkit ベース、軽量。CLI 版 (lora_chance.py) は不要
 questionary
 
-# ControlNet 前処理 (canny / depth / softedge / seg / openpose 等の image transform)
-# highrender.py --controlnet-mode で使用。各検出器は初回呼び出しで HF からモデル DL + キャッシュ
-controlnet_aux
+# ComfyUI HTTP API への WebSocket 接続 (進捗ストリーミング)
+websocket-client
+
+# ComfyUI プロセスの kill+restart (--arch cpu/cuda 切替時)
+psutil
+
+# 画像アップロード (multipart POST)
+# ComfyUI 本体が依存しているため同 venv なら既にあるが、明示する
+requests
