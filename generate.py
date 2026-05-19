@@ -375,7 +375,9 @@ def build_workflow_txt2img(
     adetailer: bool = False,
     adetailer_face_model: str = "bbox/face_yolov8n.pt",
     adetailer_hand_model: Optional[str] = "bbox/hand_yolov8n.pt",
+    adetailer_person_model: Optional[str] = "segm/person_yolov8s-seg.pt",
     adetailer_denoise: float = 0.5,
+    adetailer_person_denoise: float = 0.3,
     adetailer_steps: int = 30,
 ) -> dict:
     """SDXL txt2img の workflow JSON を組み立てる。
@@ -483,19 +485,21 @@ def build_workflow_txt2img(
         "class_type": "VAEDecode",
         "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
     }
-    # ADetailer chain (FaceDetailer for face / optional hand)
+    # ADetailer chain (FaceDetailer for face / optional hand / optional person)
     final_image_ref = ["6", 0]
     if adetailer:
-        def _facedetailer_inputs(image_ref, bbox_ref, det_seed):
+        def _facedetailer_inputs(image_ref, bbox_ref, det_seed,
+                                  denoise=adetailer_denoise,
+                                  guide_size=512.0, max_size=1024.0):
             """FaceDetailer node の inputs を返す。"""
             return {
                 "image": image_ref,
                 "model": model_ref,
                 "clip": clip_ref,
                 "vae": ["1", 2],
-                "guide_size": 512.0,
+                "guide_size": float(guide_size),
                 "guide_size_for": True,
-                "max_size": 1024.0,
+                "max_size": float(max_size),
                 "seed": det_seed,
                 "steps": int(adetailer_steps),
                 "cfg": float(cfg),
@@ -503,7 +507,7 @@ def build_workflow_txt2img(
                 "scheduler": scheduler,
                 "positive": ksampler_positive_ref,
                 "negative": ksampler_negative_ref,
-                "denoise": float(adetailer_denoise),
+                "denoise": float(denoise),
                 "feather": 5,
                 "noise_mask": True,
                 "force_inpaint": True,
@@ -545,6 +549,23 @@ def build_workflow_txt2img(
                 "inputs": _facedetailer_inputs(final_image_ref, ["22", 0], (seed + 2) & 0xFFFFFFFF),
             }
             final_image_ref = ["23", 0]
+
+        # (24)(25) Person detector + FaceDetailer (全身 inpainting、足/脚の奇形対策)
+        # 全身 region なので denoise を低め (構造維持) + guide_size を 1024 で詳細リトーチ
+        if adetailer_person_model:
+            workflow["24"] = {
+                "class_type": "UltralyticsDetectorProvider",
+                "inputs": {"model_name": adetailer_person_model},
+            }
+            workflow["25"] = {
+                "class_type": "FaceDetailer",
+                "inputs": _facedetailer_inputs(
+                    final_image_ref, ["24", 0], (seed + 3) & 0xFFFFFFFF,
+                    denoise=adetailer_person_denoise,
+                    guide_size=1024.0, max_size=2048.0,
+                ),
+            }
+            final_image_ref = ["25", 0]
 
     workflow["7"] = {
         "class_type": "SaveImage",
@@ -591,6 +612,18 @@ def save_checkpoint_toml(data: dict) -> None:
         CHECKPOINT_TOML.write_text(tomli_w.dumps(data), encoding="utf-8")
     except Exception as e:
         print(f"[警告] checkpoint.toml 保存失敗: {e}", flush=True)
+
+
+def reload_update_save_checkpoint_toml(name: str, elapsed_s: float, data: dict) -> None:
+    """ディスク上の checkpoint.toml を直前に再読込してから timing 更新 → 保存。
+    外部エディタで like/inference/style 等を編集中でも、その変更を踏み潰さない。
+    in-memory `data` も再読込後の内容で同期させ、後続の pick_checkpoint が最新値を見れるようにする。
+    """
+    fresh = load_checkpoint_toml()
+    update_checkpoint_timing(name, elapsed_s, fresh)
+    save_checkpoint_toml(fresh)
+    data.clear()
+    data.update(fresh)
 
 
 # --------------------------------------------------------------------------- #
@@ -643,10 +676,12 @@ def infer_controlnet_mode(stem: str) -> str:
     return "passthrough"
 
 
-def pick_controlnet(style: str, fixed_name: Optional[str] = None) -> Optional[Path]:
+def pick_controlnet(style: str, fixed_name: Optional[str] = None,
+                     force_openpose: bool = False) -> Optional[Path]:
     """ControlNet を抽選。
 
     - fixed_name 指定 → そのまま返す
+    - force_openpose=True → stem に 'pose'/'openpose' を含むもの から強制抽選
     - style == "anime" → ファイル名 stem に 'anime' を含むもの からランダム
     - style == "real"  → ファイル名 stem に 'real' を含むもの からランダム
     - style == "mix" or "" → 全 ControlNet からランダム
@@ -662,6 +697,17 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None) -> Optional[Pa
             if c.stem == fixed_name or c.name == fixed_name:
                 return c
         raise SystemExit(f"ControlNet が見つかりません: {fixed_name}")
+
+    if force_openpose:
+        matched = [c for c in candidates
+                   if "openpose" in c.stem.lower() or "_pose" in c.stem.lower()
+                   or c.stem.lower().endswith("pose")]
+        if not matched:
+            raise SystemExit(
+                "--pose 指定だが 2_4_ControlNet/ に openpose 系 ControlNet が見つかりません "
+                "(stem に 'openpose' / '_pose' / 末尾 'pose' を含むファイルを配置)"
+            )
+        return random.choice(matched)
 
     s = (style or "").lower()
     if s == "anime":
@@ -998,7 +1044,9 @@ def save_with_a1111_metadata(
     controlnet_name: Optional[str] = None,
     controlnet_mode: str = "",
     controlnet_strength: float = 0.0,
+    pose_source: Optional[str] = None,
     adetailer: bool = False,
+    adetailer_person: bool = False,
 ) -> None:
     """ComfyUI から取得した画像 bytes を A1111 互換メタ付きで PNG 保存する。"""
     out_path.parent.mkdir(exist_ok=True)
@@ -1023,8 +1071,10 @@ def save_with_a1111_metadata(
         parsed["params"]["Lora keywords"] = ", ".join(lora_keywords)
     if controlnet_name:
         parsed["params"]["ControlNet"] = f"{controlnet_name} (mode={controlnet_mode}, strength={controlnet_strength:.2f})"
+    if pose_source:
+        parsed["params"]["Pose source"] = pose_source
     if adetailer:
-        parsed["params"]["ADetailer"] = "on"
+        parsed["params"]["ADetailer"] = "on (person)" if adetailer_person else "on"
     parameters_text = serialize_a1111_parameters(parsed)
     write_text_chunks(out_path, {"parameters": parameters_text})
 
@@ -1054,6 +1104,13 @@ def main() -> None:
                     help="ControlNet を完全 OFF (--prompt png でソース PNG があっても使わない)")
     ap.add_argument("--controlnet-strength", type=float, default=0.7,
                     help="controlnet_conditioning_scale (既定 0.7)")
+    ap.add_argument("--pose", type=str, default=None,
+                    help="openpose 用 ソース PNG (絶対パス or 1_prompts/NAME)。"
+                         "指定すると DWPose 抽出 → openpose ControlNet を強制適用 "
+                         "(2_4_ControlNet/ に stem に 'openpose'/'_pose' を含むファイルが必要)。"
+                         "--prompt mode とは独立 (sentence/auto/png/original 全モードで併用可)")
+    ap.add_argument("--pose-strength", type=float, default=1.0,
+                    help="--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)")
     ap.add_argument("--gear", choices=["low", "high"], default="high",
                     help="low=ラフ (steps 30) / high=本番 (steps 100、既定)")
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
@@ -1067,8 +1124,11 @@ def main() -> None:
     ap.add_argument("--scheduler", type=str, default="karras")
     ap.add_argument("--lora-scale", type=float, default=0.8,
                     help="LoRA n 個重ね掛け時の合計 scale (各 LoRA strength = lora_scale/n、既定 0.8)")
-    ap.add_argument("--lora-stack-max", type=int, default=3,
-                    help="1 枚あたりの重ね掛け LoRA 最大数 (random.randint(1, N)、既定 3、1 で重ね無し、0 で完全 OFF)")
+    ap.add_argument("--lora-stack-min", type=int, default=3,
+                    help="1 枚あたりの重ね掛け LoRA 最小数 (既定 3、1 で「下限 1」)")
+    ap.add_argument("--lora-stack-max", type=int, default=5,
+                    help="1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 5、"
+                         "1 で重ね無し、0 で完全 OFF)")
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
                     help="Real-ESRGAN x4 アップスケール (3_2_upscaled に出力)。"
                          "既定: gear high で ON / gear low で OFF。明示すれば上書き")
@@ -1081,8 +1141,13 @@ def main() -> None:
                     help="ADetailer 顔検出 model (既定 face_yolov8n)")
     ap.add_argument("--adetailer-hand-model", type=str, default="bbox/hand_yolov8n.pt",
                     help="ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8n)")
+    ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8s-seg.pt",
+                    help="ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8s-seg)。"
+                         "足/脚の奇形補正に使用、denoise を低めで構造維持")
     ap.add_argument("--adetailer-denoise", type=float, default=0.5,
-                    help="ADetailer inpaint strength (既定 0.5)")
+                    help="ADetailer (face/hand) inpaint strength (既定 0.5)")
+    ap.add_argument("--adetailer-person-denoise", type=float, default=0.3,
+                    help="ADetailer person inpaint strength (既定 0.3、低めで構造維持)")
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help="ADetailer 各 detected region のステップ数 (既定 30)")
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
@@ -1146,6 +1211,14 @@ def main() -> None:
     if neg_embeddings:
         print(f"  negative embeddings: {len(neg_embeddings)} 件 ({', '.join(neg_embeddings[:5])}{'...' if len(neg_embeddings) > 5 else ''})")
 
+    # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
+    pose_png: Optional[Path] = None
+    pose_upload_name: Optional[str] = None
+    if args.pose:
+        pose_png = resolve_png_path(args.pose)
+        pose_upload_name = upload_image_to_comfyui(pose_png)
+        print(f"  pose source: {pose_png.name} (uploaded as {pose_upload_name})")
+
     stop = {"flag": False}
     def handler(_s, _f):
         stop["flag"] = True
@@ -1199,30 +1272,42 @@ def main() -> None:
                     picked_loras.append((cand, float(strength)))
             elif args.gear == "high" and all_loras and args.lora_stack_max > 0:
                 picked = pick_n_loras_by_keywords(
-                    all_loras, lora_keywords, lora_corpus, args.lora_stack_max,
+                    all_loras, lora_keywords, lora_corpus,
+                    n_max=args.lora_stack_max, n_min=args.lora_stack_min,
                 )
                 if picked:
                     n = len(picked)
                     strength = args.lora_scale / n
                     picked_loras = [(p, strength) for p in picked]
 
-            # ControlNet 抽選: gear high + src_png あり + --no-controlnet 未指定
+            # ControlNet 抽選: gear high + --no-controlnet 未指定
+            # 優先順位:
+            #   (1) --pose 指定 → openpose 強制 + pose PNG (strength=args.pose_strength)
+            #   (2) --prompt png/original の src_png → 既存通り style ベース抽選
+            #   (3) どちらもなし → ControlNet OFF
             picked_controlnet: Optional[Path] = None
             controlnet_mode = "passthrough"
             controlnet_upload_name: Optional[str] = None
-            if (args.gear == "high"
-                    and src_png is not None
-                    and not args.no_controlnet):
-                ckpt_style = (entry.get("style") or "").strip()
-                picked_controlnet = pick_controlnet(ckpt_style, args.controlnet)
-                if picked_controlnet is not None:
-                    controlnet_mode = infer_controlnet_mode(picked_controlnet.stem)
-                    # ソース PNG を ComfyUI にアップロード
-                    try:
-                        controlnet_upload_name = upload_image_to_comfyui(src_png)
-                    except Exception as e:
-                        print(f"  [warn] ControlNet 用画像 upload 失敗 ({e})、CN OFF", flush=True)
-                        picked_controlnet = None
+            effective_cn_strength = args.controlnet_strength
+            if args.gear == "high" and not args.no_controlnet:
+                if pose_upload_name is not None:
+                    picked_controlnet = pick_controlnet(
+                        "", args.controlnet, force_openpose=True,
+                    )
+                    if picked_controlnet is not None:
+                        controlnet_mode = "openpose"
+                        controlnet_upload_name = pose_upload_name
+                        effective_cn_strength = args.pose_strength
+                elif src_png is not None:
+                    ckpt_style = (entry.get("style") or "").strip()
+                    picked_controlnet = pick_controlnet(ckpt_style, args.controlnet)
+                    if picked_controlnet is not None:
+                        controlnet_mode = infer_controlnet_mode(picked_controlnet.stem)
+                        try:
+                            controlnet_upload_name = upload_image_to_comfyui(src_png)
+                        except Exception as e:
+                            print(f"  [warn] ControlNet 用画像 upload 失敗 ({e})、CN OFF", flush=True)
+                            picked_controlnet = None
 
             print(f"\n=== source {total+1} ===")
             print(f"  checkpoint: {checkpoint_path.name}"
@@ -1234,8 +1319,9 @@ def main() -> None:
                 names = [f"{p.name}({s:.2f})" for p, s in picked_loras]
                 print(f"  LoRA x{len(picked_loras)}: " + " + ".join(names))
             if picked_controlnet is not None:
+                tag = " [--pose]" if pose_upload_name is not None else ""
                 print(f"  ControlNet: {picked_controlnet.name} "
-                      f"(mode={controlnet_mode}, strength={args.controlnet_strength:.2f})")
+                      f"(mode={controlnet_mode}, strength={effective_cn_strength:.2f}){tag}")
             print(f"  seed/steps: {seed} / {use_steps}"
                   f"{f' (= {steps} + inference {inference_bonus:+})' if inference_bonus else ''}")
 
@@ -1258,6 +1344,7 @@ def main() -> None:
 
             workflow_loras = [(p.name, s) for p, s in picked_loras]
             hand_model = args.adetailer_hand_model if args.adetailer_hand_model else None
+            person_model = args.adetailer_person_model if args.adetailer_person_model else None
             workflow = build_workflow_txt2img(
                 checkpoint=checkpoint_path.name,
                 positive=positive_augmented, negative=negative_augmented,
@@ -1268,17 +1355,23 @@ def main() -> None:
                 controlnet_name=picked_controlnet.name if picked_controlnet else None,
                 controlnet_mode=controlnet_mode,
                 controlnet_image=controlnet_upload_name,
-                controlnet_strength=args.controlnet_strength,
+                controlnet_strength=effective_cn_strength,
                 upscale_model=upscale_model_name,
                 adetailer=args.adetailer,
                 adetailer_face_model=args.adetailer_face_model,
                 adetailer_hand_model=hand_model,
+                adetailer_person_model=person_model,
                 adetailer_denoise=args.adetailer_denoise,
+                adetailer_person_denoise=args.adetailer_person_denoise,
                 adetailer_steps=args.adetailer_steps,
             )
             if args.adetailer:
-                print(f"  ADetailer: face={args.adetailer_face_model}"
-                      f"{f', hand={hand_model}' if hand_model else ''}"
+                parts = [f"face={args.adetailer_face_model}"]
+                if hand_model:
+                    parts.append(f"hand={hand_model}")
+                if person_model:
+                    parts.append(f"person={person_model}@{args.adetailer_person_denoise}")
+                print(f"  ADetailer: {', '.join(parts)}"
                       f" (denoise={args.adetailer_denoise}, steps={args.adetailer_steps})")
             if upscale_model_name:
                 print(f"  upscale: {upscale_model_name}")
@@ -1313,8 +1406,10 @@ def main() -> None:
                 loras=[(p.name, s) for p, s in picked_loras],
                 controlnet_name=picked_controlnet.name if picked_controlnet else None,
                 controlnet_mode=controlnet_mode,
-                controlnet_strength=args.controlnet_strength,
+                controlnet_strength=effective_cn_strength,
+                pose_source=pose_png.name if pose_png else None,
                 adetailer=args.adetailer,
+                adetailer_person=bool(person_model) and args.adetailer,
             )
             elapsed = time.time() - iter_start
             total += 1
@@ -1341,16 +1436,19 @@ def main() -> None:
                         loras=[(p.name, s) for p, s in picked_loras],
                         controlnet_name=picked_controlnet.name if picked_controlnet else None,
                         controlnet_mode=controlnet_mode,
-                        controlnet_strength=args.controlnet_strength,
+                        controlnet_strength=effective_cn_strength,
+                        pose_source=pose_png.name if pose_png else None,
+                        adetailer=args.adetailer,
+                        adetailer_person=bool(person_model) and args.adetailer,
                     )
                     print(f"      up → 3_2_upscaled/{up_path.name}  {args.width*4}x{args.height*4} ({upscale_model_name})")
                 else:
                     print(f"  [warn] アップスケール出力が見つからない")
 
             # gear high のみ checkpoint.toml の fast/slow を更新 / 新規追記
+            # 直前にディスクから再読込してマージ → ユーザが外部エディタで編集中の他フィールドを潰さない
             if args.gear == "high":
-                update_checkpoint_timing(checkpoint_path.stem, elapsed, checkpoint_data)
-                save_checkpoint_toml(checkpoint_data)
+                reload_update_save_checkpoint_toml(checkpoint_path.stem, elapsed, checkpoint_data)
 
             # cooldown: --cooldown 明示なら固定、未指定なら (GPU 温度 - 50) 秒、取れなければ 1.0 秒
             if not stop["flag"]:

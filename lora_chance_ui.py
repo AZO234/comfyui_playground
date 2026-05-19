@@ -79,15 +79,15 @@ def build_lora_corpus_for_playground(loras: list[Path], kw_data: dict) -> dict[s
 def get_entry_keywords(entry: list, section: str) -> list[str]:
     """エントリの kw フィールドを atomic kw list で返す。
 
-    who: [char, has_motion, has_wearing?, has_where?, kw?]  (型で判別)
+    who: [char, has_wearing, has_motion?, has_where?, kw?]  (型で判別)
     その他: [value, weight, kw?]
     """
     if section == "who":
         kw_str = ""
-        # 5 要素 (v03): [char, has_motion, has_wearing, has_where, kw]
+        # 5 要素 (v03): [char, has_wearing, has_motion, has_where, kw]
         if len(entry) >= 5 and isinstance(entry[2], bool) and isinstance(entry[3], bool):
             kw_str = str(entry[4] or "")
-        # 4 要素 (v02): [char, has_motion, has_wearing, kw]
+        # 4 要素 (v02): [char, has_wearing, has_motion, kw]
         elif len(entry) >= 4 and isinstance(entry[2], bool):
             kw_str = str(entry[3] or "")
         # 3 要素 (v01): [char, has_motion, kw]
@@ -104,10 +104,11 @@ def get_entry_keywords(entry: list, section: str) -> list[str]:
 # 抽選試行
 # --------------------------------------------------------------------------- #
 def run_trials(loras: list[Path], corpus: dict, keywords: list[str],
-                n_trials: int, n_max: int = 3) -> Counter:
+                n_trials: int, n_max: int = 5, n_min: int = 3) -> Counter:
     counter: Counter = Counter()
     for _ in range(n_trials):
-        picked = pick_n_loras_by_keywords(loras, keywords, corpus, n_max=n_max)
+        picked = pick_n_loras_by_keywords(loras, keywords, corpus,
+                                            n_max=n_max, n_min=n_min)
         for p in picked:
             counter[p.stem] += 1
     return counter
@@ -136,12 +137,14 @@ def display_top(counter: Counter, n_top: int, n_trials: int) -> None:
 # --------------------------------------------------------------------------- #
 # モード: random
 # --------------------------------------------------------------------------- #
-def mode_random(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+def mode_random(cfg: dict, loras: list[Path], corpus: dict, n_trials: int,
+                 n_max: int = 5, n_min: int = 3) -> Counter:
     """build_prompt をランダムに回して、その都度の lora_keywords で抽選を蓄積。"""
     counter: Counter = Counter()
     for _ in range(n_trials):
         _pos, _neg, kws = build_prompt(cfg)
-        picked = pick_n_loras_by_keywords(loras, kws, corpus, n_max=3)
+        picked = pick_n_loras_by_keywords(loras, kws, corpus,
+                                            n_max=n_max, n_min=n_min)
         for p in picked:
             counter[p.stem] += 1
     return counter
@@ -150,7 +153,8 @@ def mode_random(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Co
 # --------------------------------------------------------------------------- #
 # モード: manual
 # --------------------------------------------------------------------------- #
-def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int,
+                 n_max: int = 5, n_min: int = 3) -> Counter:
     """各セクションをユーザ選択 → 集めた kw で抽選。"""
     sections = [
         ("who",        cfg.get("who") or []),
@@ -186,13 +190,15 @@ def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int) -> Co
         for s in selected_summary:
             print(f"  {s}")
     print(f"  → 集約 kw: {', '.join(all_kws) if all_kws else '(空)'}")
-    return run_trials(loras, corpus, all_kws, n_trials=n_trials)
+    return run_trials(loras, corpus, all_kws, n_trials=n_trials,
+                       n_max=n_max, n_min=n_min)
 
 
 # --------------------------------------------------------------------------- #
 # モード: lora_keyword
 # --------------------------------------------------------------------------- #
-def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int) -> Counter:
+def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int,
+                       n_max: int = 5, n_min: int = 3) -> Counter:
     """ユーザ入力 kw 文字列で抽選。"""
     text = questionary.text(
         "LoRA キーワードをカンマ区切りで入力 (空 = キャンセル):",
@@ -201,7 +207,8 @@ def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int) -> Counter
         return Counter()
     kws = [k.strip() for k in text.split(",") if k.strip()]
     print(f"\n入力 kw: {', '.join(kws)}")
-    return run_trials(loras, corpus, kws, n_trials=n_trials)
+    return run_trials(loras, corpus, kws, n_trials=n_trials,
+                       n_max=n_max, n_min=n_min)
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +220,10 @@ def main() -> None:
                     help="抽選試行回数 (既定 300)")
     ap.add_argument("--top", type=int, default=30,
                     help="バーグラフに表示する上位件数 (既定 30)")
+    ap.add_argument("--lora-stack-min", type=int, default=3,
+                    help="1 試行あたりの重ね掛け LoRA 最小数 (既定 3、generate.py と同既定)")
+    ap.add_argument("--lora-stack-max", type=int, default=5,
+                    help="1 試行あたりの重ね掛け LoRA 最大数 (既定 5、generate.py と同既定)")
     args = ap.parse_args()
 
     print("LoRA 列挙中...", end=" ", flush=True)
@@ -246,11 +257,14 @@ def main() -> None:
             return
         mode = MODES[choice]
         if mode == "random":
-            counter = mode_random(cfg, loras, corpus, n_trials=args.trials)
+            counter = mode_random(cfg, loras, corpus, n_trials=args.trials,
+                                    n_max=args.lora_stack_max, n_min=args.lora_stack_min)
         elif mode == "manual":
-            counter = mode_manual(cfg, loras, corpus, n_trials=args.trials)
+            counter = mode_manual(cfg, loras, corpus, n_trials=args.trials,
+                                    n_max=args.lora_stack_max, n_min=args.lora_stack_min)
         else:  # lora_keyword
-            counter = mode_lora_keyword(loras, corpus, n_trials=args.trials)
+            counter = mode_lora_keyword(loras, corpus, n_trials=args.trials,
+                                          n_max=args.lora_stack_max, n_min=args.lora_stack_min)
         display_top(counter, n_top=args.top, n_trials=args.trials)
 
 

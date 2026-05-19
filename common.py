@@ -137,15 +137,15 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
     """prompt.toml の設定から (positive, negative, lora_keywords) を組み立てる。
 
     各セクションの動作:
-      who         : [character, has_motion, has_wearing?, has_where?, kw?] から均等ランダム 1 つ。
-                    has_motion=true なら motion をスキップ。
+      who         : [character, has_wearing, has_motion?, has_where?, kw?] から均等ランダム 1 つ。
                     has_wearing=true なら wearing セクション自体をスキップ。
+                    has_motion=true なら motion をスキップ。
                     has_where=true なら at セクションをスキップ (= キャラ文字列に場所が内包、例
                     "a girl ware swimsuit at pool" / "a girl ware swimsuit in sea")。
                     後方互換: 3 要素目 / 4 要素目の **型** で旧/新を判別:
-                      - [char, has_motion, kw_str]            旧 v01 形式 (3 要素、kw のみ)
-                      - [char, has_motion, has_wearing, kw_str]  v02 形式 (4 要素、has_where=false default)
-                      - [char, has_motion, has_wearing, has_where, kw_str]  v03 形式 (5 要素、最新)
+                      - [char, has_motion, kw_str]            旧 v01 形式 (3 要素、kw のみ。bool 1 個は has_motion 扱い)
+                      - [char, has_wearing, has_motion, kw_str]    v02 形式 (4 要素、has_where=false default)
+                      - [char, has_wearing, has_motion, has_where, kw_str]  v03 形式 (5 要素、最新)
       wearing     : [clothing, weight, kw?] から重み抽選 1 つ。"nothing" → "naked"、他は "wearing X"。
                     who.has_wearing=true ならこのセクションは走らない。
       with_items  : [item, weight, kw?] から 3 回独立重み抽選 → dedupe / "nothing" 除外 → 各 "with X"。
@@ -161,8 +161,10 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
     parts: list[str] = []
     lora_keywords: list[str] = []
 
-    # 誰が: [char, has_motion, has_wearing?, has_where?, kw?]
-    # 後方互換性のため、3〜5 要素を型判定で振り分ける
+    # 誰が: [char, has_wearing, has_motion?, has_where?, kw?]
+    # 後方互換性のため、3〜5 要素を型判定で振り分ける。
+    # v01 (3 要素 [char, has_motion, kw]) は単独 bool を has_motion として扱う旧仕様。
+    # v02/v03 (4-5 要素) では [char, has_wearing, has_motion, ...] の順に変更済み。
     who_entries = cfg.get("who") or []
     has_motion = False
     has_wearing = False
@@ -170,13 +172,14 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
     if who_entries:
         chosen = random.choice(who_entries)
         char = str(chosen[0]) if chosen else ""
-        has_motion = bool(chosen[1]) if len(chosen) >= 2 else False
         kw_value: str | None = None
-        # 3 要素目 (index 2): bool (has_wearing、v02+) or str (旧 v01 kw)
+        # 3 要素目 (index 2): bool (v02+ では has_motion) or str (旧 v01 kw)
         if len(chosen) >= 3:
             third = chosen[2]
             if isinstance(third, bool):
-                has_wearing = third
+                # v02+ ルート: bool 1 個目 = has_wearing
+                has_wearing = bool(chosen[1]) if len(chosen) >= 2 else False
+                has_motion = third
                 # 4 要素目 (index 3): bool (has_where、v03) or str (v02 kw)
                 if len(chosen) >= 4:
                     fourth = chosen[3]
@@ -190,9 +193,13 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
                         if fourth:
                             kw_value = str(fourth)
             else:
-                # third is str = 旧 v01 kw, has_wearing/has_where とも False
+                # third is str = 旧 v01 形式 [char, has_motion, kw]、has_wearing/has_where とも False
+                has_motion = bool(chosen[1]) if len(chosen) >= 2 else False
                 if third:
                     kw_value = str(third)
+        elif len(chosen) >= 2:
+            # 2 要素のみ (kw 無し v01 風): bool 1 個目 = has_motion 扱い
+            has_motion = bool(chosen[1])
         if char:
             parts.append(char)
         if kw_value:
@@ -258,10 +265,25 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
 
     neg_always = str(cfg.get("negative_always") or "").strip()
 
+    # LoRA キーワード重複排除: 各 entry をカンマ区切りで atomic に分解、
+    # 大小文字無視で初出順を保つ。複数 entry に同じ kw (例: "nude") が混じっても 1 回のみ。
+    seen_kws: set[str] = set()
+    deduped_kws: list[str] = []
+    for kw_entry in lora_keywords:
+        for atom in str(kw_entry).split(","):
+            atom = atom.strip()
+            if not atom:
+                continue
+            key = atom.lower()
+            if key in seen_kws:
+                continue
+            seen_kws.add(key)
+            deduped_kws.append(atom)
+
     return (
         normalize_emphasis(", ".join(parts)),
         normalize_emphasis(neg_always),
-        lora_keywords,
+        deduped_kws,
     )
 
 
@@ -384,25 +406,64 @@ def pick_n_loras_by_keywords(
     keywords: list[str],
     corpus: dict[str, str] | None = None,
     n_max: int = 3,
+    n_min: int = 1,
 ) -> list[Path]:
-    """1〜n_max 個のユニークな LoRA を重ね掛け用に抽選する (n は random.randint で決まる)。
+    """n_min〜n_max 個のユニークな LoRA を重ね掛け用に抽選する (n は random.randint で決まる)。
 
-    各 pick は `pick_lora_by_keywords` (90% keyword match / 10% random) を、既選 LoRA を除外した
-    候補集合で呼ぶ。同じ LoRA は重複しない。compat_loras が n_max より少ない場合は実 n を縮める。
+    **1 pick = 1 キーワード** の原則。キーワード列をシャッフルして先頭から消費し、各 pick で
+    `pick_lora_by_keywords` を **その 1 キーワードだけ** で呼ぶ。これによって 1 回の生成内で
+    同じキーワードが 2 回以上 LoRA 抽選に使われない (大小文字無視で dedup 済み)。
+
+    - keywords が空 → 全 LoRA から random.choice で n_target 個
+    - keywords が n_target 未満 → 全 kw を使い切り、実 n はその数に縮む
+    - 各 pick で `pick_lora_by_keywords` の 90% match / 10% random フォールバックは生きる
+    - 既に選ばれた LoRA は次の pick の候補から除外、同じ LoRA は重複しない
 
     呼び出し側は: ① n=1 なら従来通り 1 LoRA を fuse、② n>1 なら set_adapters で複数を adapter
     として読み、scales = [args.lora_scale / n] * n で重ね掛けする想定。
     """
     if not compat_loras:
         return []
-    n_target = random.randint(1, min(n_max, len(compat_loras)))
+    # n_min/n_max を [1, len(compat_loras)] にクランプ + n_min <= n_max を保証
+    hi = max(1, min(n_max, len(compat_loras)))
+    lo = max(1, min(n_min, hi))
+    n_target = random.randint(lo, hi)
+
+    # キーワードを大小無視で dedup + シャッフル (build_prompt 側で既に dedup 済みでも安全側に再実行)
+    seen: set[str] = set()
+    unique_kws: list[str] = []
+    for kw in (keywords or []):
+        atom = str(kw).strip()
+        if not atom:
+            continue
+        key = atom.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_kws.append(atom)
+    random.shuffle(unique_kws)
+
     picked: list[Path] = []
     picked_stems: set[str] = set()
-    for _ in range(n_target):
+
+    if not unique_kws:
+        # キーワード無し: 純ランダム pick を n_target 回
+        for _ in range(n_target):
+            candidates = [l for l in compat_loras if l.stem not in picked_stems]
+            if not candidates:
+                break
+            chosen = random.choice(candidates)
+            picked.append(chosen)
+            picked_stems.add(chosen.stem)
+        return picked
+
+    # 1 pick = 1 kw 消費、kw が尽きたら停止 (実 n は min(n_target, len(unique_kws)))
+    n_actual = min(n_target, len(unique_kws))
+    for i in range(n_actual):
         candidates = [l for l in compat_loras if l.stem not in picked_stems]
         if not candidates:
             break
-        chosen = pick_lora_by_keywords(candidates, keywords, corpus)
+        chosen = pick_lora_by_keywords(candidates, [unique_kws[i]], corpus)
         if chosen is None:
             break
         picked.append(chosen)
@@ -765,9 +826,11 @@ def classify_tensor(path: Path) -> str:
             if not keys:
                 return "broken"
             # ControlNet 判別 (LoRA より先): diffusers 形式 (controlnet_*) と
-            # A1111 / 原実装形式 (control_model.* / zero_convs) の両方を拾う
+            # A1111 / 原実装形式 (control_model.* / zero_convs) と
+            # LLLite (sd-forge-controllllite、SDXL 専用) の lllite_* プレフィックス を拾う
             if any(k.startswith("controlnet_") or "controlnet_cond_embedding" in k
-                   or "control_model." in k or "zero_convs" in k for k in keys):
+                   or "control_model." in k or "zero_convs" in k
+                   or k.startswith("lllite_") for k in keys):
                 return "controlnet"
             if any("lora_" in k or ".lora_" in k for k in keys):
                 return "lora"
