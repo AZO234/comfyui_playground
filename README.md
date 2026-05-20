@@ -16,7 +16,7 @@ cd ~
 git clone https://github.com/AZO234/comfyui_playground
 python -m venv .venv
 .\.venv\Scripts\activate
-# Install PyTorch matching your environment (pick one)
+# Install PyTorch matching your environment first (pick one)
 #pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
 pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # Remaining dependencies
@@ -29,7 +29,7 @@ pip install -r requirements.txt
 $ cd ~
 $ git clone https://github.com/AZO234/comfyui_playground
 $ python -m venv .venv
-# Install PyTorch matching your environment (pick one)
+# Install PyTorch matching your environment first (pick one)
 #$ pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
 $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # Remaining dependencies
@@ -61,17 +61,20 @@ Running the command above produces images in the `3_1_generated` and `3_2_upscal
 
 ## Prompt Config: prompt.toml
 
-`prompt.toml` defines the keywords used to build prompts.
+Defines the keywords used to build prompts.
 Emphasis syntax is supported: `*word*` (1.1x), `**word**` (1.3x), `***word***` (1.5x).
 
 - `who` — Who is in the scene
   - The notation "someone wearing X doing Y at Z" is also valid (later fields can be omitted)
 
-`["**a girl**", false, false, false, ""],`
-`["**a school wear girl**", true, false, false, "school wear"],`
-`["**a school wear girl running**", true, true, false, "school wear"],`
+`["**a girl**", false, false, false, false, ""],`
+`["**a school wear girl**", true, false, false, false, "school wear"],`
+`["**a school wear girl running**", true, true, false, false, "school wear"],`
+`["**2 girls kissing**", true, true, false, true, "kiss"],`
 
-  - The three booleans flag whether the entry already contains the wearing / doing / location (true) or should draw them from the section below (false)
+  - The first three booleans flag whether the entry already contains the wearing / doing / location (true) or should draw them from the section below (false)
+  - The fourth boolean (`many`) marks a multi-person entry (e.g. "2 women"). When true, the image is generated on a landscape canvas (`--many-width` × `--many-height`, default 1216×832) to reduce fusion between figures
+  - Backward compatible: a 5-element entry without `many` (a string at index 4) is treated as `many=false`
   - LoRA keywords (last field) are described later
 
 - `wearing` — What is being worn
@@ -107,7 +110,7 @@ python pngutil.py <PNG file>
 ```
 
 - Default (no flag)
-Inspect the prompt text and LoRA keywords embedded in the PNG.
+Inspect the prompt text and LoRA keywords (described below) embedded in the PNG.
 
 - `--sentence`
 
@@ -152,7 +155,7 @@ Generates images continuously.
 
 PNGs with embedded metadata, named `YYYYMMDDHHMMSS.png`, are written to `3_1_generated` and `3_2_upscaled`.
 
-After each image, the loop waits for (device temperature − 50) seconds as a cooldown.
+After each image, there is a cooldown interval of (device temperature − 50) seconds.
 
 If the checkpoint used is not listed in `checkpoint.toml`, an entry is appended (see below).
 
@@ -174,7 +177,7 @@ Press Ctrl+C to stop.
 
 By default,
 the first run picks a checkpoint **not** listed in `checkpoint.toml` at random,
-and subsequent runs pick from the listed checkpoints with probability 2/3 (weighted) and from the unlisted ones with probability 1/3.
+and subsequent runs pick from the listed checkpoints with probability 2/3 and from the unlisted ones with probability 1/3.
 
 For entries in `checkpoint.toml`, the weight is
 ((`slow` max in `checkpoint.toml` × 2) − (`fast` + `slow`)) / 2 + `like`.
@@ -184,8 +187,8 @@ For entries in `checkpoint.toml`, the weight is
 `checkpoint.toml` stores supplementary information per checkpoint:
 - `slow` : Maximum observed generation time per image (s)
 - `fast` : Minimum observed generation time per image (s)
-- `like` : User preference, can be positive or negative
-- `inference` : Extra inference steps to add, can be positive or negative
+- `like` : User preference, positive or negative
+- `inference` : Extra inference steps to add, positive or negative
 - `style` : `"anime"`, `"real"`, `"mix"`, or `""`
 
 When `--gear high` finishes generating an image, if the checkpoint is not yet listed,
@@ -198,11 +201,10 @@ They are a word list used purely to pick LoRAs, separate from the prompt text.
 
 Matching is case-insensitive: whitespace = AND, commas = OR.
 
-Procedure:
-1. Decide the number of LoRAs (default 1–3).
-2. Pick LoRA keywords (no duplicates).
-3. With 90% probability, match the keyword against each LoRA's filename, embedded metadata, and the `keyword` field in `LoRA_keywords.toml`.
-4. With 10% probability, pick from all LoRAs + "none" uniformly.
+Decide the number of LoRAs (default 1–3) →
+pick LoRA keywords (no duplicates) →
+with 90% probability match the keyword against each LoRA's filename, embedded metadata, and the `keyword` field in `LoRA_keywords.toml`, &
+with 10% probability pick from all LoRAs + "none".
 
 Use `lora_chance_ui.py` to inspect which LoRAs are likely to be picked for a given prompt or keyword set.
 
@@ -238,9 +240,9 @@ By default the ControlNet is chosen based on the `style` field in `checkpoint.to
 - `real` → ControlNets whose filename contains `real`
 
 One is picked at random from the matching set.
-For `mix` or empty, the pick is uniformly random across all ControlNets.
+For `mix` or empty, the pick is uniformly random.
 
-Source-image routing is inferred from the ControlNet filename
+The source-image routing is also selected correctly from the ControlNet filename
 (e.g. `canny` → canny edge extraction, `tile` → pass the source image through unchanged).
 
 ### LoRA Selection Probability: lora_chance_ui.py
@@ -249,11 +251,18 @@ Source-image routing is inferred from the ControlNet filename
 python lora_chance_ui.py
 ```
 
-Runs 300 LoRA draws and prints the Top 30 selection probabilities as a bar chart.
+Runs 300 draws and prints the Top 30 LoRA selection probabilities as a bar chart.
 
 - `random` : Each draw picks `prompt.toml` entries randomly
 - `manual` : Each draw uses entries chosen interactively from `prompt.toml`
 - `lora_keyword` : Each draw uses the LoRA keywords you type
+
+## Auto-placement of face_yolov8n.pt, hand_yolov8n.pt, person_yolov8n-seg.pt
+
+The following detection models are downloaded and placed automatically if missing:
+- `ComfyUI/models/ultralytics/bbox/face_yolov8n.pt`
+- `ComfyUI/models/ultralytics/bbox/hand_yolov8n.pt`
+- `ComfyUI/models/ultralytics/segm/person_yolov8n-seg.pt`
 
 ## License
 

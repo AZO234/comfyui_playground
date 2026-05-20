@@ -34,11 +34,6 @@ $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvisi
 $ pip install -r requirements.txt
 ```
 
-## person_yolov8n-seg.pt 配置
-
-[person_yolov8n-seg.pt](https://huggingface.co/Bingsu/adetailer/blob/main/person_yolov8n-seg.pt) をダウンロードし、
-`ComfyUI/models/ultralytics/segs/` ディレクトリに配置。
-
 ## ディレクトリ構成
 
 - `./` : スクリプト・設定ファイル
@@ -70,11 +65,14 @@ python generate.py --sentence "a girl walking with umbrella in outside"
 - who だれが
   - 「どこであれを着た誰かがなにをしている」という記法も可能（後の要素を飛ばせる）
 
-`["**a girl**", false, false, false, ""],`
-`["**a school wear girl**", true, false, false, "school wear"],`
-`["**a school wear girl running**", true, true, false, "school wear"],`
+`["**a girl**", false, false, false, false, ""],`
+`["**a school wear girl**", true, false, false, false, "school wear"],`
+`["**a school wear girl running**", true, true, false, false, "school wear"],`
+`["**2 girls kissing**", true, true, false, true, "kiss"],`
 
-  - 着ているもの・している事・場所 を、含んでいればtrue、抽選にする場合はfalse
+  - 1〜3個目のbool（着ているもの・している事・場所）は、キャラ文字列に含んでいればtrue、抽選にする場合はfalse
+  - 4個目のbool（many）は、複数人エントリ（"2 women"等）ならtrue。trueのとき横長キャンバス（`--many-width` × `--many-height`、既定 1216×832）で生成し、人物どうしの融合を抑える
+  - 後方互換: many を省いた5要素（index4が文字列）は many=false 扱い
   - LoRAキーワードは後述
 
 - wearing 着ているもの
@@ -258,6 +256,13 @@ python lora_chance_ui.py
 - `random` ： prompt.toml の語句をランダムに選択した場合
 - `manual` ： prompt.toml の語句をユーザが選択した場合
 - `lora_keyword` ： 入力したlora_keywordの場合
+
+## face_yolov8n.pt、hand_yolov8n.pt、person_yolov8n-seg.pt 自動配置
+
+以下の補正ファイルは無ければ自動でダウンロードして配置されます。
+- `ComfyUI/models/ultralytics/bbox/face_yolov8n.pt`
+- `ComfyUI/models/ultralytics/bbox/hand_yolov8n.pt`
+- `ComfyUI/models/ultralytics/segm/person_yolov8n-seg.pt`
 
 ## ライセンス
 
