@@ -34,9 +34,9 @@ $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvisi
 $ pip install -r requirements.txt
 ```
 
-## person_yolov8s-seg.pt 配置
+## person_yolov8n-seg.pt 配置
 
-[person_yolov8s-seg.pt](https://huggingface.co/Bingsu/adetailer/blob/main/person_yolov8s-seg.pt) をダウンロードし、
+[person_yolov8n-seg.pt](https://huggingface.co/Bingsu/adetailer/blob/main/person_yolov8n-seg.pt) をダウンロードし、
 `ComfyUI/models/ultralytics/segs/` ディレクトリに配置。
 
 ## ディレクトリ構成

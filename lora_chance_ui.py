@@ -79,13 +79,16 @@ def build_lora_corpus_for_playground(loras: list[Path], kw_data: dict) -> dict[s
 def get_entry_keywords(entry: list, section: str) -> list[str]:
     """エントリの kw フィールドを atomic kw list で返す。
 
-    who: [char, has_wearing, has_motion?, has_where?, kw?]  (型で判別)
+    who: [char, has_wearing, has_motion?, has_where?, many?, kw?]  (型で判別)
     その他: [value, weight, kw?]
     """
     if section == "who":
         kw_str = ""
-        # 5 要素 (v03): [char, has_wearing, has_motion, has_where, kw]
-        if len(entry) >= 5 and isinstance(entry[2], bool) and isinstance(entry[3], bool):
+        # 6 要素 (v04): [char, has_wearing, has_motion, has_where, many, kw] (index4=bool)
+        if len(entry) >= 6 and isinstance(entry[2], bool) and isinstance(entry[3], bool) and isinstance(entry[4], bool):
+            kw_str = str(entry[5] or "")
+        # 5 要素 (v03): [char, has_wearing, has_motion, has_where, kw] (index4=str)
+        elif len(entry) >= 5 and isinstance(entry[2], bool) and isinstance(entry[3], bool):
             kw_str = str(entry[4] or "")
         # 4 要素 (v02): [char, has_wearing, has_motion, kw]
         elif len(entry) >= 4 and isinstance(entry[2], bool):
@@ -142,7 +145,7 @@ def mode_random(cfg: dict, loras: list[Path], corpus: dict, n_trials: int,
     """build_prompt をランダムに回して、その都度の lora_keywords で抽選を蓄積。"""
     counter: Counter = Counter()
     for _ in range(n_trials):
-        _pos, _neg, kws = build_prompt(cfg)
+        _pos, _neg, kws, _many = build_prompt(cfg)
         picked = pick_n_loras_by_keywords(loras, kws, corpus,
                                             n_max=n_max, n_min=n_min)
         for p in picked:

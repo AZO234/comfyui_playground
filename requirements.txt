@@ -32,7 +32,7 @@ compel
 onnxruntime-gpu
 
 # 対話 TUI (lora_chance_ui.py で矢印+Space 選択を出すために使用)
-# prompt_toolkit ベース、軽量。CLI 版 (lora_chance.py) は不要
+# prompt_toolkit ベース、軽量。
 questionary
 
 # ComfyUI HTTP API への WebSocket 接続 (進捗ストリーミング)

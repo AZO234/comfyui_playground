@@ -1,10 +1,10 @@
-# prompt.toml - プロンプト構成 (旧 prompt_v02.toml から改名、v03 schema)。
+# prompt.toml - プロンプト構成 (旧 prompt_v02.toml から改名、v04 schema)。
 # build_prompt() がこのファイルを読み、各セクションから抽選 → カンマ連結で prompt を作る。
 # 重み付き選択は random.choices、均等選択は random.choice。
 # `**word**` 等の強調記法は最終的に normalize_emphasis で `(word:1.3)` 形式に変換される。
 #
 # 各セクションのエントリは末尾に **LoRA キーワード** (カンマ区切り) を追加できる:
-#   who         : [character, has_motion, has_wearing?, has_where?, kw?]
+#   who         : [character, has_wearing, has_motion?, has_where?, many?, kw?]
 #   wearing     : [clothing, weight, kw?]
 #   with_items  : [item, weight, kw?]
 #   motion      : [motion, weight, kw?]
@@ -13,27 +13,32 @@
 #   - 10% : 全 LoRA からランダム抽選 (= マッチを意図的に避ける)
 # kw 列を省略した既存エントリ ([value, weight] のみ) は従来抽選にフォールバック。
 
-# 誰が: [character, has_motion, has_wearing, has_where, lora_keywords]
-# - has_motion=true → 下の [motion] セクションをスキップ (キャラ文字列に動作が内包されている)
+# 誰が: [character, has_wearing, has_motion, has_where, many, lora_keywords]
 # - has_wearing=true → 下の [wearing] 抽選をスキップ
-#                      (キャラに服装情報が内包されている前提)
+#                      (キャラに服装情報が内包されている前提、例: "school wear girl" / "naked girl")
+# - has_motion=true → 下の [motion] セクションをスキップ (キャラ文字列に動作が内包されている)
 # - has_where=true  → 下の [at] セクションをスキップ
 #                      (キャラ文字列に場所が内包されている前提、例:
 #                       "a girl ware swimsuit at pool" / "a girl ware swimsuit in sea")
-# - 後方互換:
-#     4 要素 [char, has_motion, has_wearing, kw_str]              … v02 形式 (has_where=false)
-#     3 要素 [char, has_motion, kw_str]                           … 旧 v01 形式 (kw のみ)
-#   型 (bool / str) で判別する
-# 例: ["**a girl ware swimsuit at pool**", false, true, true, "swimsuit, pool"]
-#      ← wearing スキップ + at スキップ
-# 例: ["**a naked woman**", false, true, false, ""]
-#      ← wearing スキップ、at は通常抽選
-# 例: ["**a girl**", false, false, false, ""]
+# - many=true       → 複数人エントリ (キャラ文字列が "2 women" 等)。生成側が横長キャンバス
+#                      (--many-width x --many-height、既定 1216x832) に切替えて人物融合を抑える
+# - 後方互換 (index4 の 型 bool/str で v04/v03 を判別):
+#     5 要素 [char, has_wearing, has_motion, has_where, kw_str]   … v03 形式 (index4=str、many=false)
+#     4 要素 [char, has_wearing, has_motion, kw_str]              … v02 形式 (has_where=false)
+#     3 要素 [char, has_motion, kw_str]                           … 旧 v01 形式 (kw のみ、bool は has_motion 扱い)
+# 例: ["**2 women kissing**", false, true, false, true, "kiss"]
+#      ← many=true で横長化、wearing スキップ
+# 例: ["**a girl ware swimsuit at pool**", false, true, true, false, "swimsuit, pool"]
+#      ← wearing スキップ + at スキップ、単独人物
+# 例: ["**a girl**", false, false, false, false, ""]
 #      ← 服装も場所もニュートラル、全セクション通常抽選
 # 1 つを均等ランダム抽選
 who = [
-    ["**a boy**", false, false, false, ""],
-    ["**a girl**", false, false, false, ""],
+    # plane
+    ["**a girl**", false, false, false, false, "girl"],
+    ["**a boy**", false, false, false, false, "boy"],
+    ["**2 girls**", false, false, false, true, "girl"],
+    ["**2 boys**", false, false, false, true, "boy"],
 ]
 
 # 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
@@ -42,7 +47,10 @@ who = [
 # - その他 → "wearing {clothing}" を 1 句として追加
 # 1 つを重み抽選
 wearing = [
-    ["**a cap**", 50, ""],
+    ["red shirt", 30, "suite"],
+    ["yellow shirt", 30, "suite"],
+    ["blue pants", 30, "suite"],
+    ["green pants", 30, "suite"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
@@ -52,7 +60,9 @@ wearing = [
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
     ["nothing", 50, ""],
-    ["necklace", 5, "jewel"],
+    ["ear ring", 5, "jewel"],
+    ["with dog", 5, "dog"],
+    ["with cat", 5, "cat"],
 ]
 
 # 動作: [motion, weight] または [motion, weight, lora_keywords]
@@ -63,7 +73,6 @@ motion = [
     ["standing", 50, ""],
     ["sitting", 50, ""],
     ["lying", 20, ""],
-    ["running", 20, ""],
 ]
 
 # at 場所: 1 つを均等ランダム抽選、"at {place}" 形式
@@ -71,17 +80,20 @@ at = [
     "room",
     "subway station",
     "beach",
+    "on cauch",
+	"pool side",
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式
 lighting = [
     "bright lighting",
+    "color lighting",
     "day lighting",
     "white lighting",
 ]
 
 # 必ず prompt 末尾に付加
-positive_always = "***vivid color***"
+positive_always = "***natural color***"
 
 # 必ず negative_prompt の本体になる (build_prompt は negative も返す)
-negative_always = "***lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs***"
+negative_always = "***union body, fusion body, synthesis body, low color, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs***"

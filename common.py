@@ -133,19 +133,24 @@ def _entry_keyword(entry: list | None) -> str:
     return ""
 
 
-def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
-    """prompt.toml の設定から (positive, negative, lora_keywords) を組み立てる。
+def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
+    """prompt.toml の設定から (positive, negative, lora_keywords, many) を組み立てる。
+
+    many は採用された who エントリが複数人 (例 "2 women") を表すフラグ。
+    生成側はこれを見て横長キャンバスに切り替える等の判断に使う。
 
     各セクションの動作:
-      who         : [character, has_wearing, has_motion?, has_where?, kw?] から均等ランダム 1 つ。
+      who         : [character, has_wearing, has_motion?, has_where?, many?, kw?] から均等ランダム 1 つ。
                     has_wearing=true なら wearing セクション自体をスキップ。
                     has_motion=true なら motion をスキップ。
                     has_where=true なら at セクションをスキップ (= キャラ文字列に場所が内包、例
                     "a girl ware swimsuit at pool" / "a girl ware swimsuit in sea")。
-                    後方互換: 3 要素目 / 4 要素目の **型** で旧/新を判別:
+                    many=true は複数人 (キャラ文字列が "2 women" 等)。生成側で横長化に使う。
+                    後方互換: 3〜5 要素目の **型** で版を判別:
                       - [char, has_motion, kw_str]            旧 v01 形式 (3 要素、kw のみ。bool 1 個は has_motion 扱い)
                       - [char, has_wearing, has_motion, kw_str]    v02 形式 (4 要素、has_where=false default)
-                      - [char, has_wearing, has_motion, has_where, kw_str]  v03 形式 (5 要素、最新)
+                      - [char, has_wearing, has_motion, has_where, kw_str]  v03 形式 (5 要素、index4=str)
+                      - [char, has_wearing, has_motion, has_where, many, kw_str]  v04 形式 (6 要素、index4=bool)
       wearing     : [clothing, weight, kw?] から重み抽選 1 つ。"nothing" → "naked"、他は "wearing X"。
                     who.has_wearing=true ならこのセクションは走らない。
       with_items  : [item, weight, kw?] から 3 回独立重み抽選 → dedupe / "nothing" 除外 → 各 "with X"。
@@ -169,6 +174,7 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
     has_motion = False
     has_wearing = False
     has_where = False
+    many = False
     if who_entries:
         chosen = random.choice(who_entries)
         char = str(chosen[0]) if chosen else ""
@@ -185,9 +191,16 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
                     fourth = chosen[3]
                     if isinstance(fourth, bool):
                         has_where = fourth
-                        # 5 要素目 (index 4): kw (v03)
-                        if len(chosen) >= 5 and chosen[4]:
-                            kw_value = str(chosen[4])
+                        # 5 要素目 (index 4): bool (many、v04) or str (kw、v03)
+                        if len(chosen) >= 5:
+                            fifth = chosen[4]
+                            if isinstance(fifth, bool):
+                                many = fifth
+                                # 6 要素目 (index 5): kw (v04)
+                                if len(chosen) >= 6 and chosen[5]:
+                                    kw_value = str(chosen[5])
+                            elif fifth:
+                                kw_value = str(fifth)
                     else:
                         # fourth is str = v02 kw, has_where defaults False
                         if fourth:
@@ -284,6 +297,7 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str]]:
         normalize_emphasis(", ".join(parts)),
         normalize_emphasis(neg_always),
         deduped_kws,
+        many,
     )
 
 

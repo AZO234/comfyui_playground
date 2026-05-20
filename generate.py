@@ -375,9 +375,13 @@ def build_workflow_txt2img(
     adetailer: bool = False,
     adetailer_face_model: str = "bbox/face_yolov8n.pt",
     adetailer_hand_model: Optional[str] = "bbox/hand_yolov8n.pt",
-    adetailer_person_model: Optional[str] = "segm/person_yolov8s-seg.pt",
+    adetailer_person_model: Optional[str] = "segm/person_yolov8n-seg.pt",
+    adetailer_breast_model: Optional[str] = "bbox/female-breast-v4.0-fantasy.pt",
+    adetailer_nipples_model: Optional[str] = "bbox/nipples_yolov8s.pt",
+    adetailer_pussy_model: Optional[str] = "bbox/pussy.pt",
     adetailer_denoise: float = 0.5,
     adetailer_person_denoise: float = 0.3,
+    adetailer_part_denoise: float = 0.4,
     adetailer_steps: int = 30,
 ) -> dict:
     """SDXL txt2img の workflow JSON を組み立てる。
@@ -567,6 +571,33 @@ def build_workflow_txt2img(
             }
             final_image_ref = ["25", 0]
 
+        # (26+) NSFW 部位 detector (breast → nipples → pussy の順)。
+        # bbox 検出なので標準 guide_size、denoise 低めで構造維持しつつディテール付与。
+        # 検出対象が画像に無ければ FaceDetailer は素通しするので SFW 画像でも安全。
+        part_models = [
+            (adetailer_breast_model,  4),
+            (adetailer_nipples_model, 5),
+            (adetailer_pussy_model,   6),
+        ]
+        next_id = 26
+        for part_model, seed_off in part_models:
+            if not part_model:
+                continue
+            det_id, dtl_id = str(next_id), str(next_id + 1)
+            workflow[det_id] = {
+                "class_type": "UltralyticsDetectorProvider",
+                "inputs": {"model_name": part_model},
+            }
+            workflow[dtl_id] = {
+                "class_type": "FaceDetailer",
+                "inputs": _facedetailer_inputs(
+                    final_image_ref, [det_id, 0], (seed + seed_off) & 0xFFFFFFFF,
+                    denoise=adetailer_part_denoise,
+                ),
+            }
+            final_image_ref = [dtl_id, 0]
+            next_id += 2
+
     workflow["7"] = {
         "class_type": "SaveImage",
         "inputs": {"images": final_image_ref, "filename_prefix": filename_prefix},
@@ -731,6 +762,42 @@ def upload_image_to_comfyui(image_path: Path) -> str:
         r = requests.post(f"{COMFY_BASE}/upload/image", files=files, data=data, timeout=60)
     r.raise_for_status()
     return r.json()["name"]
+
+
+# --------------------------------------------------------------------------- #
+# ADetailer (Ultralytics) モデルの自動 DL
+# --------------------------------------------------------------------------- #
+ULTRALYTICS_DIR = COMFYUI_DIR / "models" / "ultralytics"
+_ADETAILER_HF_REPO = "Bingsu/adetailer"  # face/hand/person の公式配布元
+
+
+def ensure_adetailer_model(rel_name: Optional[str]) -> Optional[str]:
+    """ADetailer モデル (例 'segm/person_yolov8n-seg.pt') が無ければ HF から DL する。
+
+    - 既に ComfyUI/models/ultralytics/<rel_name> があればそのまま返す。
+    - 無ければ Bingsu/adetailer から basename を DL してコピー → rel_name を返す。
+    - HF に無い (= NSFW 部位系など Civitai 産) で DL 失敗したら、警告して None を返す
+      (= その detector を無効化し、生成 workflow が落ちないようにする)。
+    """
+    if not rel_name:
+        return None
+    full = ULTRALYTICS_DIR / rel_name
+    if full.is_file():
+        return rel_name
+    basename = full.name
+    print(f"  [adetailer] {rel_name} が無い → {_ADETAILER_HF_REPO} から DL 試行...", flush=True)
+    try:
+        from huggingface_hub import hf_hub_download
+        import shutil
+        src = hf_hub_download(_ADETAILER_HF_REPO, basename)
+        full.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, full)
+        print(f"  [adetailer] DL 完了 → {full} ({full.stat().st_size // 1024} KB)", flush=True)
+        return rel_name
+    except Exception as e:
+        print(f"  [adetailer][warn] {basename} は自動 DL できない ({type(e).__name__})。"
+              f"この detector を無効化 (手動で {full} に配置すれば有効化)", flush=True)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -975,7 +1042,8 @@ def get_prompt_for_iteration(
 
     if mode == "auto":
         cfg = load_prompt_config()
-        pos, neg, kws = build_prompt(cfg)
+        pos, neg, kws, many = build_prompt(cfg)
+        extras["many"] = many
         return pos, neg, kws, extras
 
     if mode == "sentence":
@@ -996,7 +1064,8 @@ def get_prompt_for_iteration(
         if not positive:
             print(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", flush=True)
             cfg = load_prompt_config()
-            pos, neg, kws = build_prompt(cfg)
+            pos, neg, kws, many = build_prompt(cfg)
+            extras["many"] = many
             return pos, neg, kws, extras
         return positive, negative, kws, extras
 
@@ -1010,7 +1079,8 @@ def get_prompt_for_iteration(
         if not positive:
             print(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", flush=True)
             cfg = load_prompt_config()
-            pos, neg, kws = build_prompt(cfg)
+            pos, neg, kws, many = build_prompt(cfg)
+            extras["many"] = many
             return pos, neg, kws, extras
         # checkpoint / loras を extras に詰める (main loop で上書き適用)
         if meta["model"]:
@@ -1047,6 +1117,7 @@ def save_with_a1111_metadata(
     pose_source: Optional[str] = None,
     adetailer: bool = False,
     adetailer_person: bool = False,
+    adetailer_parts: Optional[list[str]] = None,
 ) -> None:
     """ComfyUI から取得した画像 bytes を A1111 互換メタ付きで PNG 保存する。"""
     out_path.parent.mkdir(exist_ok=True)
@@ -1074,7 +1145,8 @@ def save_with_a1111_metadata(
     if pose_source:
         parsed["params"]["Pose source"] = pose_source
     if adetailer:
-        parsed["params"]["ADetailer"] = "on (person)" if adetailer_person else "on"
+        tags = (["person"] if adetailer_person else []) + list(adetailer_parts or [])
+        parsed["params"]["ADetailer"] = f"on ({', '.join(tags)})" if tags else "on"
     parameters_text = serialize_a1111_parameters(parsed)
     write_text_chunks(out_path, {"parameters": parameters_text})
 
@@ -1120,6 +1192,10 @@ def main() -> None:
     ap.add_argument("--cfg-scale", type=float, default=7.0)
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--height", type=int, default=1024)
+    ap.add_argument("--many-width", type=int, default=1216,
+                    help="prompt.toml の who エントリが many=true のとき使う幅 (既定 1216、横長で複数人の融合抑制)")
+    ap.add_argument("--many-height", type=int, default=832,
+                    help="prompt.toml の who エントリが many=true のとき使う高さ (既定 832)")
     ap.add_argument("--sampler", type=str, default="dpmpp_2m")
     ap.add_argument("--scheduler", type=str, default="karras")
     ap.add_argument("--lora-scale", type=float, default=0.8,
@@ -1141,20 +1217,41 @@ def main() -> None:
                     help="ADetailer 顔検出 model (既定 face_yolov8n)")
     ap.add_argument("--adetailer-hand-model", type=str, default="bbox/hand_yolov8n.pt",
                     help="ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8n)")
-    ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8s-seg.pt",
-                    help="ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8s-seg)。"
+    ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8n-seg.pt",
+                    help="ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8n-seg)。"
                          "足/脚の奇形補正に使用、denoise を低めで構造維持")
+    ap.add_argument("--adetailer-breast-model", type=str, default="bbox/female-breast-v4.0-fantasy.pt",
+                    help="ADetailer 胸部検出 model (空文字で OFF、既定 female-breast-v4.0-fantasy)。検出時のみ inpaint")
+    ap.add_argument("--adetailer-nipples-model", type=str, default="bbox/nipples_yolov8s.pt",
+                    help="ADetailer 乳首検出 model (空文字で OFF、既定 nipples_yolov8s)")
+    ap.add_argument("--adetailer-pussy-model", type=str, default="bbox/pussy.pt",
+                    help="ADetailer 陰部検出 model (空文字で OFF、既定 pussy)")
     ap.add_argument("--adetailer-denoise", type=float, default=0.5,
                     help="ADetailer (face/hand) inpaint strength (既定 0.5)")
     ap.add_argument("--adetailer-person-denoise", type=float, default=0.3,
                     help="ADetailer person inpaint strength (既定 0.3、低めで構造維持)")
+    ap.add_argument("--adetailer-part-denoise", type=float, default=0.4,
+                    help="NSFW 部位 ADetailer (breast/nipples/pussy) の denoise (既定 0.4、構造維持しつつディテール付与)")
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help="ADetailer 各 detected region のステップ数 (既定 30)")
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
                     help="2_3_Embedding/ から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)")
+    ap.add_argument("--quality-prefix", type=str, default="",
+                    help="positive の先頭に常時前置する quality タグ列 (例 'score_9, score_8_up, score_7_up')。"
+                         "checkpoint の系統に合わせて指定。--pony 指定時は Pony 標準値が自動で入る")
+    ap.add_argument("--pony", action="store_true",
+                    help="Pony 系 checkpoint 用。--quality-prefix 未指定なら "
+                         "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' を前置")
     ap.add_argument("--cooldown", type=float, default=None,
                     help="1 枚生成後の待機秒。既定: GPU 温度 - 50 秒 (温度取れなければ 1.0 秒、--cooldown 0 で OFF)")
     args = ap.parse_args()
+
+    # quality 前置の確定: --quality-prefix 明示 > --pony 標準値 > 無し
+    quality_prefix = args.quality_prefix.strip()
+    if not quality_prefix and args.pony:
+        quality_prefix = "score_9, score_8_up, score_7_up, source_anime, rating_explicit"
+    if quality_prefix:
+        print(f"[quality prefix] {quality_prefix}")
 
     steps = {"low": 30, "high": 50}[args.gear]
 
@@ -1211,6 +1308,20 @@ def main() -> None:
     if neg_embeddings:
         print(f"  negative embeddings: {len(neg_embeddings)} 件 ({', '.join(neg_embeddings[:5])}{'...' if len(neg_embeddings) > 5 else ''})")
 
+    # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
+    face_model = person_model = hand_model = None
+    breast_model = nipples_model = pussy_model = None
+    if args.adetailer:
+        face_model    = ensure_adetailer_model(args.adetailer_face_model)
+        hand_model    = ensure_adetailer_model(args.adetailer_hand_model or None)
+        person_model  = ensure_adetailer_model(args.adetailer_person_model or None)
+        breast_model  = ensure_adetailer_model(args.adetailer_breast_model or None)
+        nipples_model = ensure_adetailer_model(args.adetailer_nipples_model or None)
+        pussy_model   = ensure_adetailer_model(args.adetailer_pussy_model or None)
+        if not face_model:
+            print("  [adetailer][warn] face model が無く DL も不可 → ADetailer 全体を OFF", flush=True)
+            args.adetailer = False
+
     # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
     pose_png: Optional[Path] = None
     pose_upload_name: Optional[str] = None
@@ -1240,6 +1351,16 @@ def main() -> None:
             positive, negative, lora_keywords, extras = get_prompt_for_iteration(
                 args.prompt, src_png, args.sentence, args.lora_keywords,
             )
+
+            # quality タグを positive 先頭へ前置 (Pony の score_* 等)。既に含まれていれば二重付与しない
+            if quality_prefix and not positive.lower().startswith(quality_prefix.split(",")[0].strip().lower()):
+                positive = f"{quality_prefix}, {positive}" if positive else quality_prefix
+
+            # many=true の who エントリ (複数人) は横長キャンバスで融合を抑える
+            gen_width, gen_height = args.width, args.height
+            if extras.get("many"):
+                gen_width, gen_height = args.many_width, args.many_height
+                print(f"  [many] 複数人エントリ → {gen_width}x{gen_height} (横長)")
 
             # original モード: PNG の Model を checkpoint として優先 (--checkpoint 引数より優先)
             fixed_checkpoint = args.checkpoint
@@ -1343,13 +1464,11 @@ def main() -> None:
             negative_augmented = augment_negative_with_embeddings(negative, neg_embeddings)
 
             workflow_loras = [(p.name, s) for p, s in picked_loras]
-            hand_model = args.adetailer_hand_model if args.adetailer_hand_model else None
-            person_model = args.adetailer_person_model if args.adetailer_person_model else None
             workflow = build_workflow_txt2img(
                 checkpoint=checkpoint_path.name,
                 positive=positive_augmented, negative=negative_augmented,
                 seed=seed, steps=use_steps, cfg=args.cfg_scale,
-                width=args.width, height=args.height,
+                width=gen_width, height=gen_height,
                 sampler_name=args.sampler, scheduler=args.scheduler,
                 loras=workflow_loras,
                 controlnet_name=picked_controlnet.name if picked_controlnet else None,
@@ -1358,19 +1477,27 @@ def main() -> None:
                 controlnet_strength=effective_cn_strength,
                 upscale_model=upscale_model_name,
                 adetailer=args.adetailer,
-                adetailer_face_model=args.adetailer_face_model,
+                adetailer_face_model=face_model,
                 adetailer_hand_model=hand_model,
                 adetailer_person_model=person_model,
+                adetailer_breast_model=breast_model,
+                adetailer_nipples_model=nipples_model,
+                adetailer_pussy_model=pussy_model,
                 adetailer_denoise=args.adetailer_denoise,
                 adetailer_person_denoise=args.adetailer_person_denoise,
+                adetailer_part_denoise=args.adetailer_part_denoise,
                 adetailer_steps=args.adetailer_steps,
             )
             if args.adetailer:
-                parts = [f"face={args.adetailer_face_model}"]
+                parts = [f"face={face_model}"]
                 if hand_model:
                     parts.append(f"hand={hand_model}")
                 if person_model:
                     parts.append(f"person={person_model}@{args.adetailer_person_denoise}")
+                part_detectors = [m for m in (breast_model, nipples_model, pussy_model) if m]
+                if part_detectors:
+                    short = [m.split("/")[-1] for m in part_detectors]
+                    parts.append(f"parts=[{', '.join(short)}]@{args.adetailer_part_denoise}")
                 print(f"  ADetailer: {', '.join(parts)}"
                       f" (denoise={args.adetailer_denoise}, steps={args.adetailer_steps})")
             if upscale_model_name:
@@ -1393,6 +1520,10 @@ def main() -> None:
                                      img_info.get("subfolder", ""),
                                      img_info.get("type", "output"))
 
+            part_tags = [name for name, m in (("breast", breast_model),
+                                              ("nipples", nipples_model),
+                                              ("pussy", pussy_model))
+                         if m and args.adetailer]
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
             out_path = GENERATED_DIR / f"{ts}.png"
             save_with_a1111_metadata(
@@ -1400,7 +1531,7 @@ def main() -> None:
                 positive=positive_augmented, negative=negative_augmented, seed=seed,
                 steps=use_steps, cfg=args.cfg_scale,
                 sampler=args.sampler, scheduler=args.scheduler,
-                width=args.width, height=args.height,
+                width=gen_width, height=gen_height,
                 checkpoint=checkpoint_path.name,
                 lora_keywords=lora_keywords,
                 loras=[(p.name, s) for p, s in picked_loras],
@@ -1410,10 +1541,11 @@ def main() -> None:
                 pose_source=pose_png.name if pose_png else None,
                 adetailer=args.adetailer,
                 adetailer_person=bool(person_model) and args.adetailer,
+                adetailer_parts=part_tags,
             )
             elapsed = time.time() - iter_start
             total += 1
-            print(f"  → {out_path.name}  {args.width}x{args.height}  ({elapsed:.1f}s)")
+            print(f"  → {out_path.name}  {gen_width}x{gen_height}  ({elapsed:.1f}s)")
 
             # node 14 = アップスケール後 (3_2_upscaled)
             if upscale_model_name:
@@ -1430,7 +1562,7 @@ def main() -> None:
                         positive=positive_augmented, negative=negative_augmented, seed=seed,
                         steps=use_steps, cfg=args.cfg_scale,
                         sampler=args.sampler, scheduler=args.scheduler,
-                        width=args.width * 4, height=args.height * 4,
+                        width=gen_width * 4, height=gen_height * 4,
                         checkpoint=checkpoint_path.name,
                         lora_keywords=lora_keywords,
                         loras=[(p.name, s) for p, s in picked_loras],
@@ -1440,8 +1572,9 @@ def main() -> None:
                         pose_source=pose_png.name if pose_png else None,
                         adetailer=args.adetailer,
                         adetailer_person=bool(person_model) and args.adetailer,
+                        adetailer_parts=part_tags,
                     )
-                    print(f"      up → 3_2_upscaled/{up_path.name}  {args.width*4}x{args.height*4} ({upscale_model_name})")
+                    print(f"      up → 3_2_upscaled/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
                 else:
                     print(f"  [warn] アップスケール出力が見つからない")
 
