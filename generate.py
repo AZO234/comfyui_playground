@@ -7,7 +7,7 @@
                                   ◀── GET /view?filename ──
     各 source ループで:
         prompt.toml → build_prompt → checkpoint 抽選 → workflow JSON 組立 →
-        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 3_1_generated に保存
+        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 5_1_generated に保存
 
 前提:
     `python ComfyUI/main.py --listen 127.0.0.1 --port 8188` で ComfyUI が常駐している
@@ -16,9 +16,9 @@
 Phase 1 実装範囲:
     - `--prompt auto` のみ (prompt.toml 駆動)
     - 単純 SDXL txt2img (LoRA / ControlNet / ADetailer / upscale なし)
-    - checkpoint は 2_1_checkpoint からランダム
+    - checkpoint は 4_1_SDXL_checkpoint (sd15 時 3_1_SD15_checkpoint) からランダム
     - Ctrl+C でループ停止
-    - A1111 互換メタを 3_1_generated/{YYYYMMDDHHMMSS}.png に書き込み
+    - A1111 互換メタを 5_1_generated/{YYYYMMDDHHMMSS}.png に書き込み
 """
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ import random
 import signal
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -64,15 +65,26 @@ from tensors import check_tensors
 # 定数
 # --------------------------------------------------------------------------- #
 ROOT             = Path(__file__).parent
-CHECKPOINT_DIR   = ROOT / "2_1_checkpoint"
-LORA_DIR         = ROOT / "2_2_LoRA"
-EMBEDDING_DIR    = ROOT / "2_3_Embedding"
-CONTROLNET_DIR   = ROOT / "2_4_ControlNet"
-PROMPTS_DIR      = ROOT / "1_prompts"
-GENERATED_DIR    = ROOT / "3_1_generated"
-UPSCALED_DIR     = ROOT / "3_2_upscaled"
+# --- 固定 dir 定義 (lane 非依存。extra_model_paths.yaml 生成にも使う) ---
+SD15_CHECKPOINT_DIR = ROOT / "3_1_SD15_checkpoint"
+SD15_LORA_DIR       = ROOT / "3_2_SD15_LoRA"
+SD15_EMBED_DIR      = ROOT / "3_3_SD15_Embedding"
+SD15_ROUGH_DIR      = ROOT / "3_9_SD15_rough"   # 2段チェーンの SD15 下書き保存先
+SDXL_CHECKPOINT_DIR = ROOT / "4_1_SDXL_checkpoint"
+SDXL_LORA_DIR       = ROOT / "4_2_SDXL_LoRA"
+SDXL_CONTROLNET_DIR = ROOT / "4_3_SDXL_ControlNet"
+SDXL_EMBED_DIR      = ROOT / "4_4_SDXL_Embedding"
+# --- アクティブ dir (既定 sdxl。--version sd15 で main() が SD15 に差し替え) ---
+CHECKPOINT_DIR   = SDXL_CHECKPOINT_DIR
+LORA_DIR         = SDXL_LORA_DIR
+EMBEDDING_DIR    = SDXL_EMBED_DIR
+CONTROLNET_DIR   = SDXL_CONTROLNET_DIR
+PROMPTS_DIR      = ROOT / "1_0_prompts"
+GENERATED_DIR    = ROOT / "5_1_generated"
+UPSCALED_DIR     = ROOT / "5_2_upscaled"
 CHECKPOINT_TOML  = ROOT / "checkpoint.toml"
 LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
+SDXL_LORA_TOML   = ROOT / "SDXL_LoRA.toml"   # SDXL LoRA の subject (pose のみ機能的)
 
 # checkpoint.toml の `style` → 使う Real-ESRGAN モデル
 _UPSCALE_MODEL_BY_STYLE = {
@@ -104,12 +116,44 @@ COMFY_WS   = f"ws://{COMFY_HOST}:{COMFY_PORT}/ws"
 # --------------------------------------------------------------------------- #
 # ComfyUI HTTP client (最小実装)
 # --------------------------------------------------------------------------- #
+def _format_comfy_error(body: bytes) -> str:
+    """ComfyUI の /prompt 400 レスポンス本文を、原因が分かる形に整形する。
+    本文には error.message と node_errors (どのノードの何の入力が不正か) が入る。"""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except Exception:
+        text = body.decode("utf-8", "replace").strip()
+        return text[:1500] if text else "(レスポンス本文なし)"
+    lines: list[str] = []
+    err = data.get("error") or {}
+    if err:
+        msg = err.get("message") or err.get("type") or ""
+        det = err.get("details") or ""
+        lines.append(f"{msg}{(' - ' + det) if det else ''}".strip())
+    for node_id, ne in (data.get("node_errors") or {}).items():
+        cls = ne.get("class_type", "?")
+        for e in (ne.get("errors") or []):
+            em = e.get("message") or e.get("type") or ""
+            ed = e.get("details") or ""
+            lines.append(f"  node {node_id} ({cls}): {em}{(' — ' + ed) if ed else ''}")
+    return "\n".join([ln for ln in lines if ln]) or (json.dumps(data, ensure_ascii=False)[:1500])
+
+
 def _http_post_json(url: str, body: dict) -> dict:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST",
                                   headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # ComfyUI はバリデーション失敗 (例: モデル名が候補に無い) を 400 + JSON 本文で返す。
+        # 本文を読まないと「Bad Request」しか出ず原因が分からないので、ここで整形して再 raise。
+        try:
+            detail = _format_comfy_error(e.read())
+        except Exception:
+            detail = "(本文の読取に失敗)"
+        raise RuntimeError(f"ComfyUI {e.code} {e.reason} @ {url}\n{detail}") from None
 
 
 def _http_get_json(url: str) -> dict:
@@ -245,6 +289,40 @@ def fetch_image(filename: str, subfolder: str = "", folder_type: str = "output")
 # ComfyUI server 制御 (--arch 切替で自動 restart)
 # --------------------------------------------------------------------------- #
 COMFYUI_DIR = ROOT / "ComfyUI"
+EXTRA_MODEL_PATHS_YAML = COMFYUI_DIR / "extra_model_paths.yaml"
+
+
+def write_extra_model_paths() -> bool:
+    """playground の model dir を ComfyUI に認識させる extra_model_paths.yaml を
+    dir 定数から自動生成する。SD15(3_x) / SDXL(4_x) 両レーンを登録 (ComfyUI は
+    ファイル名で全 path を横断検索するので、--version に関係なく解決できる)。
+
+    内容が変わったら True を返す (= ComfyUI 再起動が必要)。
+    dir リネームで yaml がズレて 400 になる事故を構造的に防ぐための自動生成。"""
+    content = (
+        "# 自動生成 (generate.py write_extra_model_paths)。手で編集しない。\n"
+        "# playground の model dir を ComfyUI に登録 (SD15=3_x / SDXL=4_x 両レーン)。\n"
+        "comfyui_playground:\n"
+        f"    base_path: {ROOT.as_posix()}/\n"
+        "    is_default: true\n"
+        "    checkpoints: |\n"
+        f"        {SD15_CHECKPOINT_DIR.name}/\n"
+        f"        {SDXL_CHECKPOINT_DIR.name}/\n"
+        "    loras: |\n"
+        f"        {SD15_LORA_DIR.name}/\n"
+        f"        {SDXL_LORA_DIR.name}/\n"
+        "    embeddings: |\n"
+        f"        {SD15_EMBED_DIR.name}/\n"
+        f"        {SDXL_EMBED_DIR.name}/\n"
+        f"    controlnet: {SDXL_CONTROLNET_DIR.name}/\n"
+    )
+    old = EXTRA_MODEL_PATHS_YAML.read_text(encoding="utf-8") if EXTRA_MODEL_PATHS_YAML.exists() else ""
+    if old == content:
+        return False
+    EXTRA_MODEL_PATHS_YAML.write_text(content, encoding="utf-8")
+    print(f"  [extra_model_paths] {EXTRA_MODEL_PATHS_YAML.name} を更新 (model dir 登録)", flush=True)
+    return True
+
 
 def get_comfyui_device() -> Optional[str]:
     """現 server の device 種別 ('cuda' / 'cpu') を返す。接続不能なら None。"""
@@ -330,9 +408,10 @@ def start_comfyui_server(arch: str, ready_timeout: float = 120.0) -> None:
     raise SystemExit(f"ComfyUI server ({arch}) の起動 timeout ({ready_timeout}s)")
 
 
-def ensure_comfyui_arch(arch: str) -> None:
+def ensure_comfyui_arch(arch: str, force_restart: bool = False) -> None:
     """現 server の device と `arch` を比較。mismatch なら kill + restart。
-    `arch` ∈ {'cuda', 'cpu'}。
+    `force_restart=True` なら device 一致でも再起動 (extra_model_paths.yaml 更新時など、
+    起動時設定を読み直させたいケース)。`arch` ∈ {'cuda', 'cpu'}。
     """
     cur = get_comfyui_device()
     if cur is None:
@@ -340,11 +419,11 @@ def ensure_comfyui_arch(arch: str) -> None:
         print(f"  ComfyUI 未起動 → {arch} で新規起動", flush=True)
         start_comfyui_server(arch)
         return
-    if cur == arch:
-        # 一致 → 何もしない
+    if cur == arch and not force_restart:
+        # 一致 + 再起動不要 → 何もしない
         return
-    # Mismatch → kill して起動
-    print(f"  ComfyUI device mismatch (現 {cur}, 要 {arch})、再起動中...", flush=True)
+    reason = "model path 更新で設定再読込" if (cur == arch and force_restart) else f"device mismatch (現 {cur}, 要 {arch})"
+    print(f"  ComfyUI 再起動中... ({reason})", flush=True)
     kill_comfyui_server()
     start_comfyui_server(arch)
     print(f"  ComfyUI server を {arch} で再起動完了", flush=True)
@@ -365,6 +444,8 @@ def build_workflow_txt2img(
     height: int,
     sampler_name: str = "dpmpp_2m",
     scheduler: str = "karras",
+    init_image: Optional[str] = None,
+    denoise: float = 1.0,
     filename_prefix: str = "playground",
     loras: Optional[list[tuple[str, float]]] = None,
     controlnet_name: Optional[str] = None,
@@ -384,10 +465,14 @@ def build_workflow_txt2img(
     adetailer_part_denoise: float = 0.4,
     adetailer_steps: int = 30,
 ) -> dict:
-    """SDXL txt2img の workflow JSON を組み立てる。
+    """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
 
     LoRA stacking 対応: loras = [(lora_name.safetensors, strength), ...] を渡すと
     CheckpointLoaderSimple と CLIPTextEncode/KSampler の間に LoraLoader をチェーン挿入する。
+
+    init_image (ComfyUI 上のアップロード名) を渡すと img2img になる:
+    その画像を width×height にスケール → VAEEncode → denoise (既定 1.0、img2img では <1) で再描画。
+    未指定なら EmptyLatentImage の txt2img (denoise は内部で 1.0 固定)。
     """
     workflow: dict = {
         "1": {
@@ -424,10 +509,33 @@ def build_workflow_txt2img(
         "class_type": "CLIPTextEncode",
         "inputs": {"text": negative, "clip": clip_ref},
     }
-    workflow["4"] = {
-        "class_type": "EmptyLatentImage",
-        "inputs": {"width": width, "height": height, "batch_size": 1},
-    }
+    # latent ソース: txt2img は EmptyLatentImage、img2img (init_image 指定) は
+    # LoadImage → ImageScale(width×height) → VAEEncode で init latent を作り、denoise<1 で再描画。
+    # SD15 下書き → SDXL 清書チェーンの「清書」段がこの img2img 経路を使う。
+    if init_image:
+        # node ID は 40-42 を使う (ADetailer 部位ループが 26-31 を使うため衝突回避)
+        workflow["40"] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": init_image},
+        }
+        workflow["41"] = {
+            "class_type": "ImageScale",
+            "inputs": {"image": ["40", 0], "width": width, "height": height,
+                       "upscale_method": "lanczos", "crop": "disabled"},
+        }
+        workflow["42"] = {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["41", 0], "vae": ["1", 2]},
+        }
+        latent_ref = ["42", 0]
+        ksampler_denoise = float(denoise)
+    else:
+        workflow["4"] = {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": width, "height": height, "batch_size": 1},
+        }
+        latent_ref = ["4", 0]
+        ksampler_denoise = 1.0
     # ControlNet が指定されてれば、CLIPTextEncode の conditioning を ControlNetApply で wrap
     ksampler_positive_ref = ["2", 0]
     ksampler_negative_ref = ["3", 0]
@@ -478,11 +586,11 @@ def build_workflow_txt2img(
             "cfg": cfg,
             "sampler_name": sampler_name,
             "scheduler": scheduler,
-            "denoise": 1.0,
+            "denoise": ksampler_denoise,
             "model": model_ref,  # 最終 LoraLoader (なければ CheckpointLoader) の model
             "positive": ksampler_positive_ref,
             "negative": ksampler_negative_ref,
-            "latent_image": ["4", 0],
+            "latent_image": latent_ref,
         },
     }
     workflow["6"] = {
@@ -530,31 +638,11 @@ def build_workflow_txt2img(
                 "cycle": 1,
             }
 
-        # (20) face detector
-        workflow["20"] = {
-            "class_type": "UltralyticsDetectorProvider",
-            "inputs": {"model_name": adetailer_face_model},
-        }
-        # (21) FaceDetailer 顔
-        workflow["21"] = {
-            "class_type": "FaceDetailer",
-            "inputs": _facedetailer_inputs(final_image_ref, ["20", 0], (seed + 1) & 0xFFFFFFFF),
-        }
-        final_image_ref = ["21", 0]
+        # 実行順は person → face → hand。全身の構造を先に直し、顔・手のディテールを
+        # 最後に乗せる (詳細パスが person の再描画で上書きされないように)。
+        # node ID は固定 (face=20/21 / hand=22/23 / person=24/25)、final_image_ref で連結。
 
-        # (22)(23) Hand detector + FaceDetailer (使い回し可能、別 detector で実行)
-        if adetailer_hand_model:
-            workflow["22"] = {
-                "class_type": "UltralyticsDetectorProvider",
-                "inputs": {"model_name": adetailer_hand_model},
-            }
-            workflow["23"] = {
-                "class_type": "FaceDetailer",
-                "inputs": _facedetailer_inputs(final_image_ref, ["22", 0], (seed + 2) & 0xFFFFFFFF),
-            }
-            final_image_ref = ["23", 0]
-
-        # (24)(25) Person detector + FaceDetailer (全身 inpainting、足/脚の奇形対策)
+        # (24)(25) Person detector + FaceDetailer を先に (全身 inpainting、足/脚の奇形・体の構造)
         # 全身 region なので denoise を低め (構造維持) + guide_size を 1024 で詳細リトーチ
         if adetailer_person_model:
             workflow["24"] = {
@@ -570,6 +658,29 @@ def build_workflow_txt2img(
                 ),
             }
             final_image_ref = ["25", 0]
+
+        # (20)(21) face detector + FaceDetailer (構造の後にディテールを乗せる)
+        workflow["20"] = {
+            "class_type": "UltralyticsDetectorProvider",
+            "inputs": {"model_name": adetailer_face_model},
+        }
+        workflow["21"] = {
+            "class_type": "FaceDetailer",
+            "inputs": _facedetailer_inputs(final_image_ref, ["20", 0], (seed + 1) & 0xFFFFFFFF),
+        }
+        final_image_ref = ["21", 0]
+
+        # (22)(23) Hand detector + FaceDetailer (最後 = 上書きされない)
+        if adetailer_hand_model:
+            workflow["22"] = {
+                "class_type": "UltralyticsDetectorProvider",
+                "inputs": {"model_name": adetailer_hand_model},
+            }
+            workflow["23"] = {
+                "class_type": "FaceDetailer",
+                "inputs": _facedetailer_inputs(final_image_ref, ["22", 0], (seed + 2) & 0xFFFFFFFF),
+            }
+            final_image_ref = ["23", 0]
 
         # (26+) NSFW 部位 detector (breast → nipples → pussy の順)。
         # bbox 検出なので標準 guide_size、denoise 低めで構造維持しつつディテール付与。
@@ -673,6 +784,19 @@ def load_lora_keywords_toml() -> dict:
         return {}
 
 
+def load_sdxl_lora_subjects() -> dict[str, str]:
+    """SDXL_LoRA.toml から {stem: subject(lower)} を返す。subject="pose" のみ機能的
+    (OpenPose 段で除外)。無ければ空 dict。"""
+    if not SDXL_LORA_TOML.exists():
+        return {}
+    try:
+        data = tomllib.loads(SDXL_LORA_TOML.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[警告] SDXL_LoRA.toml パース失敗 ({e})、空として扱う", flush=True)
+        return {}
+    return {stem: str((v or {}).get("subject") or "").strip().lower() for stem, v in data.items()}
+
+
 def build_lora_corpus_for_playground(loras: list[Path], lora_keywords_data: dict) -> dict[str, str]:
     """common.build_lora_corpus への薄いアダプタ。
     LoRA_keywords.toml の `keyword` フィールドを common 側の `trigger` 相当として渡す。
@@ -735,7 +859,7 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
                    or c.stem.lower().endswith("pose")]
         if not matched:
             raise SystemExit(
-                "--pose 指定だが 2_4_ControlNet/ に openpose 系 ControlNet が見つかりません "
+                "--pose 指定だが 4_3_SDXL_ControlNet/ に openpose 系 ControlNet が見つかりません "
                 "(stem に 'openpose' / '_pose' / 末尾 'pose' を含むファイルを配置)"
             )
         return random.choice(matched)
@@ -762,6 +886,34 @@ def upload_image_to_comfyui(image_path: Path) -> str:
         r = requests.post(f"{COMFY_BASE}/upload/image", files=files, data=data, timeout=60)
     r.raise_for_status()
     return r.json()["name"]
+
+
+def upload_bytes_to_comfyui(data: bytes, filename: str) -> str:
+    """画像 bytes を ComfyUI の input/ にアップロードし参照名を返す (中間下書きの受け渡し用)。"""
+    import io
+    import requests
+    files = {"image": (filename, io.BytesIO(data), "image/png")}
+    r = requests.post(f"{COMFY_BASE}/upload/image", files=files,
+                      data={"type": "input", "overwrite": "true"}, timeout=60)
+    r.raise_for_status()
+    return r.json()["name"]
+
+
+def _submit_and_fetch(workflow: dict, client_id: str, save_node: str = "7"):
+    """workflow を投入 → 完了待ち → 指定 SaveImage ノードの画像 bytes を取得。
+
+    返り値: (image_bytes|None, image_info|None, outputs)。画像が無ければ bytes=None。
+    """
+    prompt_id = submit_prompt(workflow, client_id)
+    print(f"  ComfyUI prompt_id: {prompt_id}", flush=True)
+    result = wait_for_completion_ws(prompt_id, client_id)
+    outputs = result.get("outputs", {})
+    imgs = outputs.get(save_node, {}).get("images", [])
+    if not imgs:
+        return None, None, outputs
+    info = imgs[0]
+    data = fetch_image(info["filename"], info.get("subfolder", ""), info.get("type", "output"))
+    return data, info, outputs
 
 
 # --------------------------------------------------------------------------- #
@@ -860,14 +1012,14 @@ def parse_png_full_metadata(png_path: Path) -> dict:
 
 
 def resolve_png_path(name: str) -> Path:
-    """`--png NAME` を絶対パス / 1_prompts/NAME / 1_prompts/NAME.png の順で解決。"""
+    """`--png NAME` を絶対パス / 1_0_prompts/NAME / 1_0_prompts/NAME.png の順で解決。"""
     p = Path(name)
     if p.is_absolute() and p.exists():
         return p
     for cand in (p, PROMPTS_DIR / name, PROMPTS_DIR / f"{name}.png"):
         if cand.exists():
             return cand
-    raise SystemExit(f"PNG が見つかりません: {name} (1_prompts/ を確認)")
+    raise SystemExit(f"PNG が見つかりません: {name} (1_0_prompts/ を確認)")
 
 
 def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
@@ -877,15 +1029,17 @@ def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
     elapsed = int(round(elapsed_s))
     entry = data.get(name)
     if entry is None:
-        # 新規追記
+        # 新規追記。family はファイル名から推定 (pony/illustrious/real)、外れは手で直す。
+        fam = _family_from_name(name)
         data[name] = {
             "slow": elapsed,
             "fast": elapsed,
             "like": 0,
             "inference": 0,
             "style": "",
+            "family": fam,
         }
-        print(f"  checkpoint.toml に {name} を初期登録 (slow=fast={elapsed}s)", flush=True)
+        print(f"  checkpoint.toml に {name} を初期登録 (slow=fast={elapsed}s, family={fam or '?'})", flush=True)
     else:
         cur_fast = int(entry.get("fast", elapsed))
         cur_slow = int(entry.get("slow", elapsed))
@@ -901,9 +1055,81 @@ def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
 # --------------------------------------------------------------------------- #
 # 抽選
 # --------------------------------------------------------------------------- #
-def _resolve_checkpoint_name(name: str) -> Path:
+_CKPT_MIN_BYTES = 256 * 1024 * 1024  # 256MB 未満は checkpoint ではない
+
+
+def _gather_checkpoints(dirs: list[Path]) -> list[Path]:
+    """複数 dir の checkpoint を 1 プールに集約 (name でソート)。
+
+    256MB 未満のファイルは除外する: 実体が embedding / LoRA なのに base と誤分類されて
+    checkpoint dir に紛れたファイル (例: ng_deepnegative [75,768] TI) を抽選プールから外し、
+    CheckpointLoaderSimple が "Could not detect model type" で落ちるのを防ぐ。
+    """
+    out: list[Path] = []
+    for d in dirs:
+        if not d.exists():
+            continue
+        for p in d.glob("*.safetensors"):
+            try:
+                if p.stat().st_size >= _CKPT_MIN_BYTES:
+                    out.append(p)
+            except OSError:
+                continue
+    return sorted(out, key=lambda p: p.name)
+
+
+def checkpoint_version(path: Path) -> str:
+    """checkpoint の版を置き場 dir で判定 (tensors.py が分類済なので確実)。"""
+    return "sd15" if path.parent == SD15_CHECKPOINT_DIR else "sdxl"
+
+
+def _is_pony_name(stem: str) -> bool:
+    """ファイル名から Pony 系かを推定 (pony / pdxl / pny を含む)。"""
+    s = stem.lower()
+    return ("pony" in s) or ("pdxl" in s) or ("pny" in s)
+
+
+def checkpoint_is_pony(checkpoint_path: Path, checkpoint_data: dict) -> bool:
+    """checkpoint が Pony 系か。checkpoint.toml の `family` を優先、無ければファイル名から推定。
+    (family タグは後段 (b) で付与。未設定の間はファイル名推定で動く)。"""
+    fam = str((checkpoint_data.get(checkpoint_path.stem) or {}).get("family") or "").strip().lower()
+    if fam:
+        return fam == "pony"
+    return _is_pony_name(checkpoint_path.stem)
+
+
+def gate_neg_embeddings(neg_stems: list[str], is_pony: bool, pony_cap: int = 3) -> list[str]:
+    """neg embedding を系統に応じて取捨:
+    - 非 Pony checkpoint → Pony 専用 embed (名前に Pny/Pony/PDXL) を**除外** (色崩壊/主体消失防止)。
+    - Pony checkpoint → 汎用 embed は全通し、Pony 専用 embed は **pony_cap 個まで** (過剰ネガ抑制)。
+    汎用 embed は系統問わず常に通す。"""
+    general = [e for e in neg_stems if not _is_pony_name(e)]
+    if not is_pony:
+        return general
+    pony = [e for e in neg_stems if _is_pony_name(e)]
+    return general + pony[:pony_cap]
+
+
+# Pony 系 checkpoint に自動前置する quality タグ (score 条件付け)
+PONY_SCORE_PREFIX = "score_9, score_8_up, score_7_up, source_anime, rating_explicit"
+
+
+def _family_from_name(stem: str) -> str:
+    """ファイル名から checkpoint 系統を推定 (checkpoint.toml `family` の初期値)。
+    判定不能は "" (ユーザが手で補正する想定)。メタには系統が無いのでファイル名が頼り。"""
+    s = stem.lower()
+    if ("pony" in s) or ("pdxl" in s) or ("pny" in s):
+        return "pony"
+    if ("illustrious" in s) or ("ilxl" in s) or ("noob" in s):
+        return "illustrious"
+    if ("real" in s) or ("photo" in s):
+        return "real"
+    return ""
+
+
+def _resolve_checkpoint_name(name: str, dirs: Optional[list[Path]] = None) -> Path:
     """`--checkpoint NAME` 解決。stem / .safetensors 付きどちらでも可。"""
-    candidates = sorted(CHECKPOINT_DIR.glob("*.safetensors"))
+    candidates = _gather_checkpoints(dirs or [CHECKPOINT_DIR])
     for c in candidates:
         if c.stem == name or c.name == name:
             return c
@@ -914,8 +1140,13 @@ def pick_checkpoint(
     data: dict,
     state: dict,
     fixed_name: Optional[str] = None,
+    pool_dirs: Optional[list[Path]] = None,
 ) -> Path:
     """checkpoint を抽選 (`checkpoint.toml` 連動)。
+
+    `pool_dirs` を渡すと複数 dir (SD15 3_1 + SDXL 4_1 等) を 1 つの統合プールとして
+    重み付き抽選する。版を区別せず checkpoint.toml の重みのみで引く (偏りは like で手動調整)。
+    未指定なら従来どおり CHECKPOINT_DIR 単独。
 
     ルール:
         - `fixed_name` 指定 (= `--checkpoint NAME`) → そのまま返す
@@ -924,11 +1155,12 @@ def pick_checkpoint(
         - 計測済み内の重み: `max(1, (max_slow*2 - (fast + slow)) / 2 + like)`
         - 片方しか無ければそちらに寄せる
     """
-    candidates = sorted(CHECKPOINT_DIR.glob("*.safetensors"))
+    dirs = pool_dirs or [CHECKPOINT_DIR]
+    candidates = _gather_checkpoints(dirs)
     if not candidates:
-        raise SystemExit(f"{CHECKPOINT_DIR} に SDXL checkpoint がありません")
+        raise SystemExit(f"{', '.join(d.name for d in dirs)} に checkpoint がありません")
     if fixed_name:
-        return _resolve_checkpoint_name(fixed_name)
+        return _resolve_checkpoint_name(fixed_name, dirs)
 
     scored   = [c for c in candidates if c.stem in data]
     unscored = [c for c in candidates if c.stem not in data]
@@ -970,16 +1202,17 @@ def _weighted_pick_scored(scored: list[Path], data: dict) -> Path:
 # --------------------------------------------------------------------------- #
 # プロンプト後処理: LoRA キーワードを (0.8/N) 重み付けで positive に append
 # --------------------------------------------------------------------------- #
-def collect_negative_embeddings() -> list[str]:
-    """`2_3_Embedding/` 配下から負のクオリティ embedding を集める。
+def collect_negative_embeddings(embed_dir: Optional[Path] = None) -> list[str]:
+    """`embed_dir` (既定 EMBEDDING_DIR、sdxl=4_4 / sd15=3_2) 配下から負のクオリティ embedding を集める。
 
     判定: stem を lowercase して `neg` / `bad` / `worst` を含むものを採用。
     例: `PonyXL_NegScore-neg.safetensors` / `SmoothNegative_Hands-neg.safetensors` 等。
     """
-    if not EMBEDDING_DIR.exists():
+    d = embed_dir or EMBEDDING_DIR
+    if not d.exists():
         return []
     stems: list[str] = []
-    for p in sorted(EMBEDDING_DIR.glob("*.safetensors")):
+    for p in sorted(d.glob("*.safetensors")):
         s = p.stem.lower()
         if "neg" in s or "bad" in s or "worst" in s:
             stems.append(p.stem)
@@ -1057,6 +1290,23 @@ def get_prompt_for_iteration(
             kws = [k.strip() for k in lora_keywords_arg.split(",") if k.strip()]
         return positive, negative, kws, extras
 
+    if mode == "refine":
+        # 画質アップ: PNG の埋込プロンプトを採用 (無ければ --sentence)。negative 無しは negative_always。
+        # 画像そのものは loop 側で init_image に使う (img2img)。
+        positive = negative = ""
+        kws = []
+        if png_path is not None:
+            positive, negative, kws = parse_png_prompt_metadata(png_path)
+        if not positive and sentence:
+            positive = normalize_emphasis(sentence)
+        if not negative:
+            cfg = load_prompt_config()
+            negative = normalize_emphasis(str(cfg.get("negative_always") or ""))
+        if lora_keywords_arg:
+            kws = [k.strip() for k in lora_keywords_arg.split(",") if k.strip()]
+        extras["refine"] = True
+        return positive, negative, kws, extras
+
     if mode == "png":
         if png_path is None:
             raise SystemExit("--prompt png には --png <PNG> が必要")
@@ -1118,8 +1368,15 @@ def save_with_a1111_metadata(
     adetailer: bool = False,
     adetailer_person: bool = False,
     adetailer_parts: Optional[list[str]] = None,
+    pipeline: Optional[str] = None,
+    draft_checkpoint: Optional[str] = None,
+    draft_loras: Optional[list[tuple[str, float]]] = None,
 ) -> None:
-    """ComfyUI から取得した画像 bytes を A1111 互換メタ付きで PNG 保存する。"""
+    """ComfyUI から取得した画像 bytes を A1111 互換メタ付きで PNG 保存する。
+
+    2段チェーン時は draft_checkpoint / draft_loras に SD15 下書き段の情報を渡すと、
+    `Draft model:` / `Draft loras:` として記録する (清書段は Model: / Loras:)。
+    """
     out_path.parent.mkdir(exist_ok=True)
     out_path.write_bytes(image_bytes)
     parsed = {
@@ -1147,6 +1404,12 @@ def save_with_a1111_metadata(
     if adetailer:
         tags = (["person"] if adetailer_person else []) + list(adetailer_parts or [])
         parsed["params"]["ADetailer"] = f"on ({', '.join(tags)})" if tags else "on"
+    if pipeline:
+        parsed["params"]["Pipeline"] = pipeline
+    if draft_checkpoint:
+        parsed["params"]["Draft model"] = draft_checkpoint
+    if draft_loras:
+        parsed["params"]["Draft loras"] = ", ".join(f"{n}: {s:.2f}" for n, s in draft_loras)
     parameters_text = serialize_a1111_parameters(parsed)
     write_text_chunks(out_path, {"parameters": parameters_text})
 
@@ -1169,7 +1432,13 @@ def main() -> None:
     ap.add_argument("--lora-keywords", type=str, default=None,
                     help="--prompt sentence のとき、LoRA キーワード列 (カンマ区切り)")
     ap.add_argument("--png", type=str, default=None,
-                    help="--prompt png/original のときの PNG ファイル名 (1_prompts/ 配下 or 絶対パス)")
+                    help="画質アップ refine 用 PNG (1_0_prompts/ 配下 or 絶対パス)。"
+                         "その画像を SDXL img2img で描き直して SD15→SDXL 画質に上げる (1 枚で終了)")
+    ap.add_argument("--png-sentence", type=str, default=None,
+                    help="PNG の埋込プロンプト『文章』で生成する PNG (画像は使わない)。"
+                         "統合抽選 (SD15/SDXL→1/2段) で連続量産。--prompt original と併用で全メタ流用")
+    ap.add_argument("--refine-denoise", type=float, default=0.5,
+                    help="--png refine の img2img denoise (既定 0.5。低=元忠実 / 高=SDXL が大きく描き直す)")
     ap.add_argument("--controlnet", type=str, default=None,
                     help="ControlNet を固定 (name or stem)")
     ap.add_argument("--no-controlnet", action="store_true",
@@ -1177,9 +1446,9 @@ def main() -> None:
     ap.add_argument("--controlnet-strength", type=float, default=0.7,
                     help="controlnet_conditioning_scale (既定 0.7)")
     ap.add_argument("--pose", type=str, default=None,
-                    help="openpose 用 ソース PNG (絶対パス or 1_prompts/NAME)。"
+                    help="openpose 用 ソース PNG (絶対パス or 1_0_prompts/NAME)。"
                          "指定すると DWPose 抽出 → openpose ControlNet を強制適用 "
-                         "(2_4_ControlNet/ に stem に 'openpose'/'_pose' を含むファイルが必要)。"
+                         "(4_3_SDXL_ControlNet/ に stem に 'openpose'/'_pose' を含むファイルが必要)。"
                          "--prompt mode とは独立 (sentence/auto/png/original 全モードで併用可)")
     ap.add_argument("--pose-strength", type=float, default=1.0,
                     help="--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)")
@@ -1187,15 +1456,30 @@ def main() -> None:
                     help="low=ラフ (steps 30) / high=本番 (steps 100、既定)")
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
                     help="ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)")
+    ap.add_argument("--version", choices=["auto", "sdxl", "sd15"], default="auto",
+                    help="checkpoint 抽選プールの絞り込み。auto=SD15+SDXL 統合 (既定) / "
+                         "sdxl=4_1 のみ / sd15=3_1 のみ。当選 checkpoint の版で 1 段/2 段が決まる "
+                         "(gear high + SD15 当選 → SD15 下書き→SDXL 清書の 2 段)")
+    ap.add_argument("--chain-denoise", type=float, default=0.45,
+                    help="gear high で SD15 が当選したときの SDXL 清書 img2img の denoise "
+                         "(既定 0.45。低=下書きの構図/色を保持、高=SDXL が描き直す)")
+    ap.add_argument("--save-draft", action=argparse.BooleanOptionalAction, default=True,
+                    help="2 段チェーン時、中間の SD15 下書きを 3_9_SD15_rough に保存 (既定 ON、--no-save-draft で OFF)")
     ap.add_argument("--checkpoint", type=str, default=None,
                     help="checkpoint を固定。NAME or NAME.safetensors")
     ap.add_argument("--cfg-scale", type=float, default=7.0)
-    ap.add_argument("--width", type=int, default=1024)
-    ap.add_argument("--height", type=int, default=1024)
-    ap.add_argument("--many-width", type=int, default=1216,
-                    help="prompt.toml の who エントリが many=true のとき使う幅 (既定 1216、横長で複数人の融合抑制)")
-    ap.add_argument("--many-height", type=int, default=832,
-                    help="prompt.toml の who エントリが many=true のとき使う高さ (既定 832)")
+    ap.add_argument("--width", type=int, default=None,
+                    help="生成幅 (未指定: sdxl=1024 / sd15=512)")
+    ap.add_argument("--height", type=int, default=None,
+                    help="生成高さ (未指定: sdxl=1024 / sd15=512)")
+    ap.add_argument("--many-width", type=int, default=None,
+                    help="many=true のとき使う幅 (未指定: sdxl=1216 / sd15=768、横長で複数人の融合抑制)")
+    ap.add_argument("--many-height", type=int, default=None,
+                    help="many=true のとき使う高さ (未指定: sdxl=832 / sd15=512)")
+    ap.add_argument("--many", action="store_true",
+                    help="複数人モードを強制 ON (横長キャンバスで生成)。--sentence/--png 等 "
+                         "prompt.toml 由来でない入力で複数人を描くとき指定。auto モードでは "
+                         "who エントリの many 判定と OR で効く")
     ap.add_argument("--sampler", type=str, default="dpmpp_2m")
     ap.add_argument("--scheduler", type=str, default="karras")
     ap.add_argument("--lora-scale", type=float, default=0.8,
@@ -1206,7 +1490,7 @@ def main() -> None:
                     help="1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 5、"
                          "1 で重ね無し、0 で完全 OFF)")
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
-                    help="Real-ESRGAN x4 アップスケール (3_2_upscaled に出力)。"
+                    help="Real-ESRGAN x4 アップスケール (5_2_upscaled に出力)。"
                          "既定: gear high で ON / gear low で OFF。明示すれば上書き")
     ap.add_argument("--upscale-model", type=str, default=None,
                     help="アップスケール用 Real-ESRGAN モデル名 (既定: style=anime → anime6B、"
@@ -1235,7 +1519,7 @@ def main() -> None:
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help="ADetailer 各 detected region のステップ数 (既定 30)")
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
-                    help="2_3_Embedding/ から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)")
+                    help="Embedding dir (sdxl=4_4 / sd15=3_2) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)")
     ap.add_argument("--quality-prefix", type=str, default="",
                     help="positive の先頭に常時前置する quality タグ列 (例 'score_9, score_8_up, score_7_up')。"
                          "checkpoint の系統に合わせて指定。--pony 指定時は Pony 標準値が自動で入る")
@@ -1246,22 +1530,47 @@ def main() -> None:
                     help="1 枚生成後の待機秒。既定: GPU 温度 - 50 秒 (温度取れなければ 1.0 秒、--cooldown 0 で OFF)")
     args = ap.parse_args()
 
+    # --version は checkpoint 抽選プールの絞り込みのみ (auto=両レーン統合)。
+    # 当選 checkpoint の版 (置き場 dir) で 1 段 / 2 段が決まるので、ここで lane は固定しない。
+    if args.version == "sd15":
+        pool_dirs = [SD15_CHECKPOINT_DIR]
+    elif args.version == "sdxl":
+        pool_dirs = [SDXL_CHECKPOINT_DIR]
+    else:  # auto
+        pool_dirs = [SD15_CHECKPOINT_DIR, SDXL_CHECKPOINT_DIR]
+
+    # 解像度は当選版で決まる (loop の lane_resolution で per-pick 解決)。
+    # 明示があればそれ優先、無ければ sd15=512 / sdxl=1024、many は sd15=768x512 / sdxl=1216x832。
+    def lane_resolution(lane: str, many: bool) -> tuple[int, int]:
+        if lane == "sd15":
+            w, h, mw, mh = args.width or 512, args.height or 512, args.many_width or 768, args.many_height or 512
+        else:
+            w, h, mw, mh = args.width or 1024, args.height or 1024, args.many_width or 1216, args.many_height or 832
+        return (mw, mh) if many else (w, h)
+
     # quality 前置の確定: --quality-prefix 明示 > --pony 標準値 > 無し
-    quality_prefix = args.quality_prefix.strip()
-    if not quality_prefix and args.pony:
-        quality_prefix = "score_9, score_8_up, score_7_up, source_anime, rating_explicit"
-    if quality_prefix:
-        print(f"[quality prefix] {quality_prefix}")
+    # quality 前置の方針 (実際の付与は清書/単一段で family を見て per-checkpoint に行う):
+    #   明示 --quality-prefix > --pony (全 checkpoint に強制) > family=="pony" の checkpoint に自動
+    # SD15 下書き段には前置しない (Pony は SDXL のみ)。
+    explicit_prefix = args.quality_prefix.strip()
+    if explicit_prefix:
+        print(f"[quality prefix] 明示 (全 checkpoint): {explicit_prefix}")
+    elif args.pony:
+        print(f"[quality prefix] --pony: 全 checkpoint に Pony score を前置")
+    else:
+        print(f"[quality prefix] family=pony の checkpoint にのみ Pony score を自動前置")
 
     steps = {"low": 30, "high": 50}[args.gear]
 
-    # --sentence / --png 単独指定で --prompt mode を自動推定 (UX 改善)
-    # 例: `generate.py --sentence "..."` → --prompt sentence を暗黙適用
-    if args.prompt == "auto":
-        if args.sentence:
-            args.prompt = "sentence"
-        elif args.png:
+    # 入力ソースから mode を確定 (UX): --png=画質アップ refine / --png-sentence=PNG文章生成 / --sentence=文章
+    #   --png は最優先 (refine)。--png-sentence は png(文章) だが --prompt original 明示は尊重。
+    if args.png:
+        args.prompt = "refine"
+    elif args.png_sentence:
+        if args.prompt not in ("png", "original"):
             args.prompt = "png"
+    elif args.sentence and args.prompt == "auto":
+        args.prompt = "sentence"
 
     # アップスケール / ADetailer 既定 (gear に紐づき、明示で上書き)
     if args.upscale is None:
@@ -1269,19 +1578,28 @@ def main() -> None:
     if args.adetailer is None:
         args.adetailer = (args.gear == "high")
 
+    pool_label = {"auto": "SD15+SDXL", "sd15": "SD15", "sdxl": "SDXL"}[args.version]
     print(f"=== generate.py ===")
-    print(f"prompt mode: {args.prompt}  gear: {args.gear} (steps={steps})  arch: {args.arch}  "
+    print(f"checkpoint pool: {pool_label}  prompt mode: {args.prompt}  "
+          f"gear: {args.gear} (steps={steps})  arch: {args.arch}  "
           f"upscale: {args.upscale}  adetailer: {args.adetailer}")
+    if args.gear == "high":
+        print(f"  gear high: SDXL 当選→1パス清書 / SD15 当選→SD15下書き→SDXL清書 "
+              f"(img2img denoise {args.chain_denoise})")
 
     print(f"\n--- tensors triage ---")
     counts = check_tensors()
-    print(f"  checkpoint={counts['checkpoint']}  LoRA={counts['lora']}  embedding={counts['embedding']}  "
-          f"controlnet={counts['controlnet']}  SD15={counts['sd15']}  error={counts['error']}")
-    if counts["checkpoint"] == 0:
-        raise SystemExit(f"\n{CHECKPOINT_DIR} に SDXL checkpoint がありません。先に 2_tensors に投入を")
+    print(f"  SDXL: ckpt={counts['checkpoint']} LoRA={counts['lora']} "
+          f"embed={counts['embedding']} CN={counts['controlnet']}   "
+          f"SD15: ckpt={counts['sd15_checkpoint']} LoRA={counts['sd15_lora']} "
+          f"embed={counts['sd15_embedding']}   error={counts['error']}")
+    if not _gather_checkpoints(pool_dirs):
+        raise SystemExit(f"\n抽選プール ({', '.join(d.name for d in pool_dirs)}) に "
+                         f"checkpoint がありません。先に 2_0_tensors に投入を")
 
     print(f"\n--- ComfyUI 接続確認 / device 整合 ---")
-    ensure_comfyui_arch(args.arch)
+    yaml_changed = write_extra_model_paths()  # model dir を ComfyUI に登録 (dir 定数から自動生成)
+    ensure_comfyui_arch(args.arch, force_restart=yaml_changed)
     cur_device = get_comfyui_device()
     if cur_device is None:
         raise SystemExit(f"ComfyUI に接続できません ({COMFY_BASE})")
@@ -1296,17 +1614,24 @@ def main() -> None:
     checkpoint_data = load_checkpoint_toml()
     pick_state: dict = {}
 
-    # LoRA_keywords.toml + LoRA 一覧 + corpus 構築 (起動時 1 回)
+    # LoRA / neg embedding を両レーン分まとめて準備 (起動時 1 回)。
+    # 統合抽選で SD15/SDXL どちらが当選しても、その版の LoRA・embed を使えるようにする。
     lora_keywords_data = load_lora_keywords_toml()
-    all_loras = sorted(LORA_DIR.glob("*.safetensors")) if args.lora_stack_max > 0 else []
-    lora_corpus = build_lora_corpus_for_playground(all_loras, lora_keywords_data) if all_loras else {}
-    if all_loras:
-        print(f"  LoRA 候補: {len(all_loras)} 件 / keywords.toml 登録: {len(lora_keywords_data)} 件")
+    sdxl_lora_subjects = load_sdxl_lora_subjects()  # {stem: subject}。pose は OpenPose 段で除外
 
-    # 負のクオリティ embedding (起動時 1 回スキャン)
-    neg_embeddings = collect_negative_embeddings() if args.embeddings else []
-    if neg_embeddings:
-        print(f"  negative embeddings: {len(neg_embeddings)} 件 ({', '.join(neg_embeddings[:5])}{'...' if len(neg_embeddings) > 5 else ''})")
+    def _prep_lane(lora_dir: Path, embed_dir: Path) -> dict:
+        loras = sorted(lora_dir.glob("*.safetensors")) if args.lora_stack_max > 0 else []
+        corpus = build_lora_corpus_for_playground(loras, lora_keywords_data) if loras else {}
+        negs = collect_negative_embeddings(embed_dir) if args.embeddings else []
+        return {"loras": loras, "corpus": corpus, "neg": negs, "lora_dir": lora_dir}
+
+    lane_assets = {
+        "sdxl": _prep_lane(SDXL_LORA_DIR, SDXL_EMBED_DIR),
+        "sd15": _prep_lane(SD15_LORA_DIR, SD15_EMBED_DIR),
+    }
+    for ln in ("sdxl", "sd15"):
+        a = lane_assets[ln]
+        print(f"  [{ln}] LoRA 候補: {len(a['loras'])} 件 / neg embed: {len(a['neg'])} 件")
 
     # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
     face_model = person_model = hand_model = None
@@ -1341,59 +1666,121 @@ def main() -> None:
         try:
             iter_start = time.time()
 
-            # --prompt png/original のときソース PNG を一度だけ用意
+            # ソース PNG 解決: refine=--png (画像を使う) / png,original=--png-sentence (文章を使う)
             src_png: Optional[Path] = None
-            if args.prompt in ("png", "original"):
+            if args.prompt == "refine":
                 if not args.png:
-                    raise SystemExit(f"--prompt {args.prompt} には --png <PNG> が必要")
+                    raise SystemExit("--png <PNG> が必要")
                 src_png = resolve_png_path(args.png)
+            elif args.prompt in ("png", "original"):
+                if not args.png_sentence:
+                    raise SystemExit(f"--prompt {args.prompt} には --png-sentence <PNG> が必要")
+                src_png = resolve_png_path(args.png_sentence)
 
             positive, negative, lora_keywords, extras = get_prompt_for_iteration(
                 args.prompt, src_png, args.sentence, args.lora_keywords,
             )
+            is_refine = bool(extras.get("refine"))  # 画質アップ (PNG を init に SDXL img2img、1枚)
+            # quality 前置は清書/単一段 (SDXL) で family を見て付与する (下書き段には付けない)。
 
-            # quality タグを positive 先頭へ前置 (Pony の score_* 等)。既に含まれていれば二重付与しない
-            if quality_prefix and not positive.lower().startswith(quality_prefix.split(",")[0].strip().lower()):
-                positive = f"{quality_prefix}, {positive}" if positive else quality_prefix
-
-            # many=true の who エントリ (複数人) は横長キャンバスで融合を抑える
-            gen_width, gen_height = args.width, args.height
-            if extras.get("many"):
-                gen_width, gen_height = args.many_width, args.many_height
-                print(f"  [many] 複数人エントリ → {gen_width}x{gen_height} (横長)")
-
-            # original モード: PNG の Model を checkpoint として優先 (--checkpoint 引数より優先)
+            # checkpoint 抽選: refine は SDXL 専用プール (画質アップ目的)、他は --version プール
             fixed_checkpoint = args.checkpoint
             if "model" in extras:
                 fixed_checkpoint = extras["model"]
-            checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, fixed_checkpoint)
-
+            iter_pool = [SDXL_CHECKPOINT_DIR] if is_refine else pool_dirs
+            checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, fixed_checkpoint, pool_dirs=iter_pool)
+            ckpt_lane = checkpoint_version(checkpoint_path)  # 当選版 (3_1=sd15 / 4_1=sdxl)
             seed = random.randint(0, 2**32 - 1)
+            many = bool(extras.get("many") or args.many)
 
+            print(f"\n=== source {total+1} ===")
+
+            # ---- 2 段チェーン: gear high + SD15 当選 → SD15 下書き → SDXL 清書 ----
+            chain = (args.gear == "high" and ckpt_lane == "sd15" and not is_refine)
+            init_image_name: Optional[str] = None
+            draft_checkpoint_meta: Optional[str] = None      # 2段時の SD15 下書き checkpoint (メタ記録用)
+            draft_loras_meta: list[tuple[str, float]] = []   # 2段時の SD15 下書き LoRA (メタ記録用)
+            if is_refine:
+                # 画質アップ: PNG をそのまま init に SDXL img2img (チェーンの清書段だけを単体実行)
+                init_image_name = upload_image_to_comfyui(src_png)
+                pipeline_label = f"refine (src: {src_png.stem}, denoise {args.refine_denoise})"
+                print(f"  [refine] {src_png.name} を SDXL img2img で画質アップ "
+                      f"(denoise {args.refine_denoise})", flush=True)
+            elif chain:
+                draft_ckpt = checkpoint_path
+                sd15a = lane_assets["sd15"]
+                d_w, d_h = lane_resolution("sd15", many)
+                d_loras: list[tuple[Path, float]] = []
+                if sd15a["loras"] and args.lora_stack_max > 0:
+                    dp = pick_n_loras_by_keywords(sd15a["loras"], lora_keywords, sd15a["corpus"],
+                                                  n_max=args.lora_stack_max, n_min=args.lora_stack_min)
+                    if dp:
+                        ds = args.lora_scale / len(dp)
+                        d_loras = [(p, ds) for p in dp]
+                draft_checkpoint_meta = draft_ckpt.name
+                draft_loras_meta = [(p.name, s) for p, s in d_loras]
+                d_steps = max(1, steps + int(checkpoint_data.get(draft_ckpt.stem, {}).get("inference", 0)))
+                d_pos = augment_positive_with_lora_keywords(positive, lora_keywords)
+                d_neg = augment_negative_with_embeddings(negative, gate_neg_embeddings(sd15a["neg"], False))
+                lk = f"  LoRA x{len(d_loras)}" if d_loras else ""
+                print(f"  [chain] SD15 下書き生成中: {draft_ckpt.name} ({d_w}x{d_h}){lk}", flush=True)
+                draft_wf = build_workflow_txt2img(
+                    checkpoint=draft_ckpt.name, positive=d_pos, negative=d_neg,
+                    seed=seed, steps=d_steps, cfg=args.cfg_scale, width=d_w, height=d_h,
+                    sampler_name=args.sampler, scheduler=args.scheduler,
+                    loras=[(p.name, s) for p, s in d_loras],
+                    filename_prefix="playground_draft",
+                )
+                d_bytes, _d_info, _ = _submit_and_fetch(draft_wf, client_id)
+                if d_bytes is None:
+                    print("  [warn] 下書き生成に失敗、この枚をスキップ", flush=True)
+                    continue
+                if args.save_draft:
+                    SD15_ROUGH_DIR.mkdir(exist_ok=True)
+                    dts = datetime.now().strftime("%Y%m%d%H%M%S")
+                    (SD15_ROUGH_DIR / f"{dts}_draft.png").write_bytes(d_bytes)
+                    print(f"  下書き保存: 3_9_SD15_rough/{dts}_draft.png")
+                init_image_name = upload_bytes_to_comfyui(d_bytes, f"draft_{seed}.png")
+                # 清書は SDXL を別途抽選 → 以降は SDXL stage として通常 body を実行
+                checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, args.checkpoint,
+                                                  pool_dirs=[SDXL_CHECKPOINT_DIR])
+                ckpt_lane = "sdxl"
+                pipeline_label = (f"SD15→SDXL 2段 (draft: {draft_ckpt.stem} / "
+                                  f"clean: {checkpoint_path.stem}, denoise {args.chain_denoise})")
+            else:
+                pipeline_label = f"{ckpt_lane.upper()} 1パス"
+
+            # ---- 清書 / 単一パス stage (active lane = ckpt_lane の資産を使う) ----
+            active = lane_assets[ckpt_lane]
+            gen_width, gen_height = lane_resolution(ckpt_lane, many)
+            if is_refine:
+                # 元 PNG のアスペクトを保ったまま ~1MP (SDXL ネイティブ) にスケール
+                from PIL import Image as _PILImage
+                with _PILImage.open(src_png) as _im:
+                    _ow, _oh = _im.size
+                _sc = (1024 * 1024 / max(1, _ow * _oh)) ** 0.5
+                gen_width  = max(512, round(_ow * _sc / 8) * 8)
+                gen_height = max(512, round(_oh * _sc / 8) * 8)
             entry = checkpoint_data.get(checkpoint_path.stem, {})
             inference_bonus = int(entry.get("inference", 0))
             use_steps = max(1, steps + inference_bonus)
 
-            # LoRA: original モードは PNG 由来をそのまま使う (抽選 skip)。
-            # それ以外は通常 keyword 抽選 (90% match / 10% random)。
+            # LoRA: original モードは PNG 由来 (chain 時は不可)、それ以外は active lane で keyword 抽選
             picked_loras: list[tuple[Path, float]] = []
-            if "loras" in extras:
-                # original モード: PNG メタの (name, strength) をそのまま使う
-                #  ファイル名は LoRA_DIR で存在確認、無いものは捨てる
+            if "loras" in extras and not chain:
                 for name, strength in extras["loras"]:
-                    cand = LORA_DIR / name
+                    cand = active["lora_dir"] / name
                     if not cand.exists():
-                        # stem だけ書かれてる場合も拾う
-                        cand2 = LORA_DIR / f"{name}.safetensors" if not name.endswith(".safetensors") else cand
+                        cand2 = active["lora_dir"] / f"{name}.safetensors" if not name.endswith(".safetensors") else cand
                         if cand2.exists():
                             cand = cand2
                         else:
                             print(f"  [warn] PNG メタの LoRA が見つからない: {name}、スキップ", flush=True)
                             continue
                     picked_loras.append((cand, float(strength)))
-            elif args.gear == "high" and all_loras and args.lora_stack_max > 0:
+            elif args.gear == "high" and active["loras"] and args.lora_stack_max > 0:
                 picked = pick_n_loras_by_keywords(
-                    all_loras, lora_keywords, lora_corpus,
+                    active["loras"], lora_keywords, active["corpus"],
                     n_max=args.lora_stack_max, n_min=args.lora_stack_min,
                 )
                 if picked:
@@ -1401,20 +1788,14 @@ def main() -> None:
                     strength = args.lora_scale / n
                     picked_loras = [(p, strength) for p in picked]
 
-            # ControlNet 抽選: gear high + --no-controlnet 未指定
-            # 優先順位:
-            #   (1) --pose 指定 → openpose 強制 + pose PNG (strength=args.pose_strength)
-            #   (2) --prompt png/original の src_png → 既存通り style ベース抽選
-            #   (3) どちらもなし → ControlNet OFF
+            # ControlNet 抽選 (SDXL stage のみ。SD15 stage に SDXL CN は載らない)
             picked_controlnet: Optional[Path] = None
             controlnet_mode = "passthrough"
             controlnet_upload_name: Optional[str] = None
             effective_cn_strength = args.controlnet_strength
-            if args.gear == "high" and not args.no_controlnet:
+            if args.gear == "high" and not args.no_controlnet and ckpt_lane == "sdxl" and not is_refine:
                 if pose_upload_name is not None:
-                    picked_controlnet = pick_controlnet(
-                        "", args.controlnet, force_openpose=True,
-                    )
+                    picked_controlnet = pick_controlnet("", args.controlnet, force_openpose=True)
                     if picked_controlnet is not None:
                         controlnet_mode = "openpose"
                         controlnet_upload_name = pose_upload_name
@@ -1430,8 +1811,17 @@ def main() -> None:
                             print(f"  [warn] ControlNet 用画像 upload 失敗 ({e})、CN OFF", flush=True)
                             picked_controlnet = None
 
-            print(f"\n=== source {total+1} ===")
-            print(f"  checkpoint: {checkpoint_path.name}"
+            # OpenPose 有効時は pose 系 LoRA を除外 (姿勢の取り合い回避、SDXL_LoRA.toml subject=pose)
+            if controlnet_mode == "openpose" and picked_loras:
+                dropped_pose = [p.name for p, _ in picked_loras
+                                if sdxl_lora_subjects.get(p.stem) == "pose"]
+                if dropped_pose:
+                    picked_loras = [(p, s) for p, s in picked_loras
+                                    if sdxl_lora_subjects.get(p.stem) != "pose"]
+                    print(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped_pose)}")
+
+            print(f"  path      : {pipeline_label}")
+            print(f"  checkpoint: {checkpoint_path.name} ({ckpt_lane.upper()})"
                   f"{' (未計測)' if checkpoint_path.stem not in checkpoint_data else ''}")
             print(f"  positive  : {positive[:120]}{'...' if len(positive) > 120 else ''}")
             print(f"  negative  : {negative[:80]}{'...' if len(negative) > 80 else ''}")
@@ -1443,8 +1833,11 @@ def main() -> None:
                 tag = " [--pose]" if pose_upload_name is not None else ""
                 print(f"  ControlNet: {picked_controlnet.name} "
                       f"(mode={controlnet_mode}, strength={effective_cn_strength:.2f}){tag}")
+            if many:
+                print(f"  size      : {gen_width}x{gen_height} (many 横長)")
             print(f"  seed/steps: {seed} / {use_steps}"
-                  f"{f' (= {steps} + inference {inference_bonus:+})' if inference_bonus else ''}")
+                  f"{f' (= {steps} + inference {inference_bonus:+})' if inference_bonus else ''}"
+                  f"{f' / img2img denoise {args.chain_denoise}' if chain else ''}")
 
             # アップスケールモデル選択: --upscale-model 指定 → そのまま、未指定 → style ベース
             upscale_model_name: Optional[str] = None
@@ -1455,13 +1848,32 @@ def main() -> None:
                     style = (entry.get("style") or "").strip().lower()
                     upscale_model_name = _UPSCALE_MODEL_BY_STYLE.get(style, _UPSCALE_MODEL_DEFAULT)
 
-            # LoRA キーワードを (0.8/N) 重みで positive に append (README L193 仕様)
-            positive_augmented = augment_positive_with_lora_keywords(positive, lora_keywords)
-            if positive_augmented != positive:
-                print(f"  prompt+kw : ...{positive_augmented[len(positive):][:80]}")
+            # この段 (清書/単一パス = checkpoint_path) の系統を確定 (family タグ優先・無ければ名前)
+            ckpt_is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
 
-            # 負のクオリティ embedding を negative に追加 (奇形/低クオリティ抑制)
-            negative_augmented = augment_negative_with_embeddings(negative, neg_embeddings)
+            # quality 前置: 明示 > --pony > family==pony 自動。SD15 下書き段には付けない (ここは清書/単一段)
+            eff_prefix = explicit_prefix
+            if not eff_prefix and (args.pony or ckpt_is_pony):
+                eff_prefix = PONY_SCORE_PREFIX
+            pos_for_stage = positive
+            if eff_prefix and not positive.lower().startswith(eff_prefix.split(",")[0].strip().lower()):
+                pos_for_stage = f"{eff_prefix}, {positive}" if positive else eff_prefix
+                src = "明示" if explicit_prefix else ("--pony" if args.pony else "family=pony")
+                print(f"  [score] {src} → {eff_prefix.split(',')[0].strip()}…")
+
+            # LoRA キーワードを (0.8/N) 重みで positive に append (README L193 仕様)
+            positive_augmented = augment_positive_with_lora_keywords(pos_for_stage, lora_keywords)
+            if positive_augmented != pos_for_stage:
+                print(f"  prompt+kw : ...{positive_augmented[len(pos_for_stage):][:80]}")
+
+            # 負のクオリティ embedding を negative に追加 (active lane の embed)。
+            # Pony 専用 embed は Pony checkpoint のときだけ通す (非 Pony への誤爆 = 色崩壊/主体消失を防ぐ)。
+            gated_neg = gate_neg_embeddings(active["neg"], ckpt_is_pony)
+            if len(gated_neg) != len(active["neg"]):
+                dropped = [e for e in active["neg"] if e not in gated_neg]
+                why = "Pony embed 上限3超過" if ckpt_is_pony else "非Pony → Pony embed"
+                print(f"  [neg-gate] {why} 除外: {', '.join(dropped)}")
+            negative_augmented = augment_negative_with_embeddings(negative, gated_neg)
 
             workflow_loras = [(p.name, s) for p, s in picked_loras]
             workflow = build_workflow_txt2img(
@@ -1470,6 +1882,8 @@ def main() -> None:
                 seed=seed, steps=use_steps, cfg=args.cfg_scale,
                 width=gen_width, height=gen_height,
                 sampler_name=args.sampler, scheduler=args.scheduler,
+                init_image=init_image_name,                          # chain/refine 時: init 画像 (img2img)
+                denoise=(args.refine_denoise if is_refine else (args.chain_denoise if chain else 1.0)),
                 loras=workflow_loras,
                 controlnet_name=picked_controlnet.name if picked_controlnet else None,
                 controlnet_mode=controlnet_mode,
@@ -1509,7 +1923,7 @@ def main() -> None:
             result = wait_for_completion_ws(prompt_id, client_id)
 
             outputs = result.get("outputs", {})
-            # node 7 = 通常解像度 (3_1_generated)
+            # node 7 = 通常解像度 (5_1_generated)
             save_node = outputs.get("7", {})
             images = save_node.get("images", [])
             if not images:
@@ -1542,12 +1956,17 @@ def main() -> None:
                 adetailer=args.adetailer,
                 adetailer_person=bool(person_model) and args.adetailer,
                 adetailer_parts=part_tags,
+                pipeline=pipeline_label,
+                draft_checkpoint=draft_checkpoint_meta,
+                draft_loras=draft_loras_meta,
             )
             elapsed = time.time() - iter_start
             total += 1
             print(f"  → {out_path.name}  {gen_width}x{gen_height}  ({elapsed:.1f}s)")
+            if is_refine:
+                stop["flag"] = True  # --png refine は 1 枚で終了 (この後の upscale 保存まではやる)
 
-            # node 14 = アップスケール後 (3_2_upscaled)
+            # node 14 = アップスケール後 (5_2_upscaled)
             if upscale_model_name:
                 up_node = outputs.get("14", {})
                 up_images = up_node.get("images", [])
@@ -1573,8 +1992,11 @@ def main() -> None:
                         adetailer=args.adetailer,
                         adetailer_person=bool(person_model) and args.adetailer,
                         adetailer_parts=part_tags,
+                        pipeline=pipeline_label,
+                        draft_checkpoint=draft_checkpoint_meta,
+                        draft_loras=draft_loras_meta,
                     )
-                    print(f"      up → 3_2_upscaled/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
+                    print(f"      up → 5_2_upscaled/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
                 else:
                     print(f"  [warn] アップスケール出力が見つからない")
 

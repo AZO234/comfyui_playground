@@ -47,7 +47,7 @@ from common import (
 # 定数
 # --------------------------------------------------------------------------- #
 ROOT               = Path(__file__).parent
-LORA_DIR           = ROOT / "2_2_LoRA"
+LORA_DIR           = ROOT / "4_2_SDXL_LoRA"
 LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
 
 

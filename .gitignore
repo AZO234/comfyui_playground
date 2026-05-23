@@ -228,25 +228,35 @@ AI.md
 MEMORY.md
 
 # project
+# NOTE: 各 dir は `dir/*` で中身だけ ignore する (dir 自体を ignore すると
+#       配下 placeholder の `!` 再包含が効かず、空 dir を git 追跡できないため)
 ComfyUI/
-1_prompts/
-!1_prompts/put PNG picture(included prompt).txt
-2_tensors/
-!2_tensors/put tensors.txt
-2_1_checkpoint/
-!2_1_checkpoint/output checkpoint tensors.txt
-2_2_LoRA/
-!2_2_LoRA/output LoRA tensors.txt
-2_3_Embedding/
-!2_3_Embedding/output Embedding tensors.txt
-2_4_ControlNet/
-!2_4_ControlNet/output ControlNet tensors.txt
-2_8_SD15/
-!2_8_SD15/output for SD15 tensors.txt
-2_9_error/
-!2_9_error/output error tensors.txt
-3_1_generated/
-!3_1_generated/output generated PNG picture(included prompt).txt
-3_2_upscaled/
-!3_2_upscaled/output upscaled PNG picture(included prompt).txt
+1_0_prompts/*
+!1_0_prompts/put PNG picture(included prompt).txt
+2_0_tensors/*
+!2_0_tensors/put tensors.txt
+2_1_errortensors/*
+!2_1_errortensors/output error tensors.txt
+2_2_lowtensor/*
+!2_2_lowtensor/put bad tensors here (excluded from generation).txt
+3_1_SD15_checkpoint/*
+!3_1_SD15_checkpoint/output SD15 checkpoint tensors.txt
+3_2_SD15_LoRA/*
+!3_2_SD15_LoRA/output SD15 LoRA tensors.txt
+3_3_SD15_Embedding/*
+!3_3_SD15_Embedding/output SD15 Embedding tensors.txt
+3_9_SD15_rough/*
+!3_9_SD15_rough/output SD15 rough drafts.txt
+4_1_SDXL_checkpoint/*
+!4_1_SDXL_checkpoint/output SDXL checkpoint tensors.txt
+4_2_SDXL_LoRA/*
+!4_2_SDXL_LoRA/output SDXL LoRA tensors.txt
+4_3_SDXL_ControlNet/*
+!4_3_SDXL_ControlNet/output ControlNet tensors.txt
+4_4_SDXL_Embedding/*
+!4_4_SDXL_Embedding/output SDXL Embedding tensors.txt
+5_1_generated/*
+!5_1_generated/output generated PNG picture(included prompt).txt
+5_2_upscaled/*
+!5_2_upscaled/output upscaled PNG picture(included prompt).txt
 tensors_cache.toml

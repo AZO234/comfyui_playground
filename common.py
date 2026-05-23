@@ -850,9 +850,22 @@ def classify_tensor(path: Path) -> str:
                 return "lora"
             if any(k in {"emb_params", "string_to_param"} or k.startswith("string_to_param") for k in keys):
                 return "embedding"
-            if len(keys) <= 4:
+            # Textual Inversion / Embedding: キー数が極端に少ない (base は数百〜数千キー)。
+            # 各テンソルは 1D、または 2D なら最終次元が text encoder の hidden dim
+            # (768=CLIP-L / 1280=bigG / 1024 / 2048)。
+            # 例: ng_deepnegative_v1_75t は [75,768] (prod 57600 で旧 50k 閾値を超えるが TI embedding)。
+            if len(keys) <= 8:
                 shapes = [list(f.get_slice(k).get_shape()) for k in keys]
-                if all(len(s) <= 2 and math.prod(s) < 50_000 for s in shapes):
+                _EMB_DIMS = {768, 1024, 1280, 2048}
+
+                def _is_emb_shape(s: list[int]) -> bool:
+                    if len(s) == 1:
+                        return True
+                    if len(s) == 2:
+                        return s[-1] in _EMB_DIMS or math.prod(s) < 50_000
+                    return False
+
+                if shapes and all(_is_emb_shape(s) for s in shapes):
                     return "embedding"
         # base 判定後に inpainting checkpoint (UNet 入力 9ch、通常 pipe では使えない) を名前で除外
         if "inpaint" in path.stem.lower():

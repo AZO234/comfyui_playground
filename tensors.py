@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""tensors.py - `2_tensors` 受入トレーのテンソルを分類して各 dir へ振り分ける CLI。
+"""tensors.py - `2_0_tensors` 受入トレーのテンソルを分類して各 dir へ振り分ける CLI。
 
 処理内容 (idempotent、何度実行しても安全):
-    - 2_tensors の zip 展開 / ckpt → safetensors 変換
-    - hash 取得 + 重複検出 (mtime 古い方を 2_9_error へ)
+    - 2_0_tensors の zip 展開 / ckpt → safetensors 変換
+    - hash 取得 + 重複検出 (mtime 古い方を 2_1_errortensors へ)
     - classify_tensor で base / LoRA / Embedding / ControlNet / inpainting / broken を判別
-    - SDXL → 2_1_checkpoint / 2_2_LoRA / 2_3_Embedding (playground は SDXL 中心)
-    - SD15 → 2_8_SD15 (下位テンソル一括格納)
-    - ControlNet → 2_4_ControlNet
-    - broken / inpainting / 判別不能 → 2_9_error
+    - SDXL → 4_1_SDXL_checkpoint / 4_2_SDXL_LoRA / 4_4_SDXL_Embedding (本番レーン)
+    - SD15  → 3_1_SD15_checkpoint / 3_3_SD15_LoRA / 3_2_SD15_Embedding (rough/量産レーン)
+    - ControlNet → 4_3_SDXL_ControlNet
+    - broken / inpainting / 判別不能 → 2_1_errortensors
     - キャッシュは tensors_cache.toml (path: {size, mtime, hash, kind, version})
 
 policy:
-    - 2_4_ControlNet と 2_9_error は **scan しない** (手動配置を尊重、再分類しない)
-    - 2_8_SD15 も scan しない (deprecated bucket、user が手動整理する想定)
+    - 4_3_SDXL_ControlNet と 2_1_errortensors は **scan しない** (手動配置を尊重、再分類しない)
+    - SD15 / SDXL の base・LoRA・Embedding dir は scan する (直接投入分も dedup + 再分類)
 
 使い方:
     python tensors.py
@@ -52,13 +52,17 @@ except (AttributeError, OSError):
 # dir 構成
 # --------------------------------------------------------------------------- #
 ROOT = Path(__file__).parent
-TENSORS_DIR    = ROOT / "2_tensors"          # 受入トレー (ユーザがここに投入)
-CHECKPOINT_DIR = ROOT / "2_1_checkpoint"     # SDXL base
-LORA_DIR       = ROOT / "2_2_LoRA"           # SDXL LoRA
-EMBED_DIR      = ROOT / "2_3_Embedding"      # SDXL Embedding
-CONTROLNET_DIR = ROOT / "2_4_ControlNet"     # ControlNet (手動配置、scan しない)
-SD15_DIR       = ROOT / "2_8_SD15"           # SD15 など下位テンソル (deprecated bucket)
-ERROR_DIR      = ROOT / "2_9_error"          # 不正 / 破損 / inpainting
+TENSORS_DIR    = ROOT / "2_0_tensors"        # 受入トレー (ユーザがここに投入)
+ERROR_DIR      = ROOT / "2_1_errortensors"   # 不正 / 破損 / inpainting
+# --- SD15 レーン (rough/量産) ---
+SD15_CKPT_DIR  = ROOT / "3_1_SD15_checkpoint" # SD15 base
+SD15_LORA_DIR  = ROOT / "3_2_SD15_LoRA"       # SD15 LoRA
+SD15_EMBED_DIR = ROOT / "3_3_SD15_Embedding"  # SD15 Embedding
+# --- SDXL レーン (本番) ---
+CHECKPOINT_DIR = ROOT / "4_1_SDXL_checkpoint" # SDXL base
+LORA_DIR       = ROOT / "4_2_SDXL_LoRA"       # SDXL LoRA
+CONTROLNET_DIR = ROOT / "4_3_SDXL_ControlNet" # ControlNet (手動配置、scan しない)
+EMBED_DIR      = ROOT / "4_4_SDXL_Embedding"  # SDXL Embedding
 
 CACHE_FILE = ROOT / "tensors_cache.toml"
 
@@ -98,21 +102,21 @@ def _classified_destination(kind: str, entry: dict) -> Path:
         if ver == "sdxl":
             return CHECKPOINT_DIR
         if ver == "sd15":
-            return SD15_DIR
+            return SD15_CKPT_DIR
         return ERROR_DIR
     if kind == "lora":
         ver = entry.get("lora_version")
         if ver == "sdxl":
             return LORA_DIR
         if ver == "sd15":
-            return SD15_DIR
+            return SD15_LORA_DIR
         return ERROR_DIR
     if kind == "embedding":
         ver = entry.get("embedding_version")
         if ver == "sdxl":
             return EMBED_DIR
         if ver == "sd15":
-            return SD15_DIR
+            return SD15_EMBED_DIR
         return ERROR_DIR
     return ERROR_DIR
 
@@ -163,8 +167,9 @@ def _safe_extract_tensors(zip_path: Path, dest: Path) -> int:
 # --------------------------------------------------------------------------- #
 def check_tensors() -> dict:
     """テンソル振り分けを実行し、各 dir の件数を返す。"""
-    for d in (TENSORS_DIR, CHECKPOINT_DIR, LORA_DIR, EMBED_DIR,
-              CONTROLNET_DIR, SD15_DIR, ERROR_DIR):
+    for d in (TENSORS_DIR, ERROR_DIR,
+              SD15_CKPT_DIR, SD15_EMBED_DIR, SD15_LORA_DIR,
+              CHECKPOINT_DIR, LORA_DIR, CONTROLNET_DIR, EMBED_DIR):
         d.mkdir(exist_ok=True)
     cache = load_cache()
 
@@ -180,10 +185,10 @@ def check_tensors() -> dict:
         print(f"[zip] {path.name} ({_human_size(path.stat().st_size)})", flush=True)
         try:
             n = _safe_extract_tensors(path, TENSORS_DIR)
-            print(f"  展開 {n} 件 → 2_tensors / 元 zip → 2_9_error", flush=True)
+            print(f"  展開 {n} 件 → 2_0_tensors / 元 zip → 2_1_errortensors", flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
         except Exception as e:
-            print(f"  展開失敗 ({e}) → 2_9_error", flush=True)
+            print(f"  展開失敗 ({e}) → 2_1_errortensors", flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
 
     for path in sorted([*TENSORS_DIR.glob("*.ckpt"), *TENSORS_DIR.glob("*.pt"), *TENSORS_DIR.glob("*.bin")]):
@@ -192,12 +197,15 @@ def check_tensors() -> dict:
             convert_to_safetensors(path)
             path.unlink()
         except Exception as e:
-            print(f"  変換失敗 ({e}) → 2_9_error", flush=True)
+            print(f"  変換失敗 ({e}) → 2_1_errortensors", flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
 
     # ---- Phase 2a: scan + hash ----
-    # 2_4_ControlNet / 2_8_SD15 / 2_9_error は scan しない (手動配置 / deprecated / 退避先)
-    scan_dirs = [TENSORS_DIR, CHECKPOINT_DIR, LORA_DIR, EMBED_DIR]
+    # ControlNet (4_3) / error (2_1) は scan しない (手動配置 / 退避先)。
+    # SD15 / SDXL の base・LoRA・Embedding dir は scan し、直接投入分も dedup + 再分類する。
+    scan_dirs = [TENSORS_DIR,
+                 SD15_CKPT_DIR, SD15_LORA_DIR, SD15_EMBED_DIR,
+                 CHECKPOINT_DIR, LORA_DIR, EMBED_DIR]
     all_files: list[Path] = []
     for d in scan_dirs:
         all_files.extend(d.glob("*.safetensors"))
@@ -305,18 +313,74 @@ def check_tensors() -> dict:
             cache[k] = {kk: vv for kk, vv in v.items() if vv is not None}
     save_cache(cache)
 
+    # SDXL LoRA の種別表 (subject) を更新 (ユーザ記入分は保持、ヒントは再生成)
+    update_sdxl_lora_toml()
+
     return {
-        "checkpoint": _count(CHECKPOINT_DIR),
-        "lora":       _count(LORA_DIR),
-        "embedding":  _count(EMBED_DIR),
-        "controlnet": _count(CONTROLNET_DIR),
-        "sd15":       _count(SD15_DIR),
-        "error":      _count(ERROR_DIR),
+        "checkpoint":      _count(CHECKPOINT_DIR),
+        "lora":            _count(LORA_DIR),
+        "embedding":       _count(EMBED_DIR),
+        "controlnet":      _count(CONTROLNET_DIR),
+        "sd15_checkpoint": _count(SD15_CKPT_DIR),
+        "sd15_lora":       _count(SD15_LORA_DIR),
+        "sd15_embedding":  _count(SD15_EMBED_DIR),
+        "error":           _count(ERROR_DIR),
     }
 
 
 def _count(d: Path) -> int:
     return len(list(d.glob("*.safetensors"))) if d.exists() else 0
+
+
+# --------------------------------------------------------------------------- #
+# SDXL_LoRA.toml (SDXL LoRA の種別 subject。pose のみ機能的=OpenPose ゲート用)
+# --------------------------------------------------------------------------- #
+SDXL_LORA_TOML = ROOT / "SDXL_LoRA.toml"
+_LORA_HINT_NOISE = {"v1", "v2", "v3", "v4", "v5", "v6", "v10", "v20", "v30", "v50",
+                    "sdxl", "xl", "lora", "il", "ill", "pony", "fp16", "bf16", ""}
+
+
+def _lora_hint(stem: str) -> str:
+    """ファイル名から整理ヒント語を抽出 (subject 記入の手がかり: 物? アクセサリ? 等)。"""
+    import re
+    seen: list[str] = []
+    for w in re.split(r"[ _\-.,()@\[\]]+", stem):
+        if not w or w.isdigit() or w.lower() in _LORA_HINT_NOISE:
+            continue
+        if w not in seen:
+            seen.append(w)
+    return ", ".join(seen)[:120]
+
+
+def update_sdxl_lora_toml() -> int:
+    """4_2_SDXL_LoRA の各 LoRA に `subject` を持つ SDXL_LoRA.toml を生成/更新。
+
+    - `subject` はユーザ記入 (object/accessory/ware/facial/pose 等)。**既存値は保持**。
+    - 行末 `# hint:` はファイル名由来の自動ヒント (毎回再生成・編集不要)。
+    - 機能的に意味を持つのは `subject="pose"` のみ (generate.py が OpenPose 段で除外)。
+    """
+    loras = sorted(LORA_DIR.glob("*.safetensors"))
+    existing: dict = {}
+    if SDXL_LORA_TOML.exists():
+        try:
+            existing = tomllib.loads(SDXL_LORA_TOML.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    lines = [
+        "# SDXL LoRA の種別。subject に object / accessory / ware / facial / pose 等を記入。",
+        '# 機能的に意味を持つのは subject="pose" のみ (OpenPose と競合 → 清書段で自動除外)。',
+        "# 行末 # hint: はファイル名由来の自動ヒント (毎回再生成・編集不要)。",
+        "",
+    ]
+    for p in loras:
+        stem = p.stem
+        subj = str((existing.get(stem) or {}).get("subject") or "")
+        hint = _lora_hint(stem)
+        lines.append(f'["{stem}"]')
+        lines.append(f'subject = "{subj}"' + (f"  # hint: {hint}" if hint else ""))
+        lines.append("")
+    SDXL_LORA_TOML.write_text("\n".join(lines), encoding="utf-8")
+    return len(loras)
 
 
 # --------------------------------------------------------------------------- #
@@ -326,12 +390,14 @@ def main() -> None:
     counts = check_tensors()
     print()
     print("=== 振り分け結果 ===")
-    print(f"  2_1_checkpoint   : {counts['checkpoint']:4d}")
-    print(f"  2_2_LoRA         : {counts['lora']:4d}")
-    print(f"  2_3_Embedding    : {counts['embedding']:4d}")
-    print(f"  2_4_ControlNet   : {counts['controlnet']:4d}")
-    print(f"  2_8_SD15         : {counts['sd15']:4d}")
-    print(f"  2_9_error        : {counts['error']:4d}")
+    print(f"  3_1_SD15_checkpoint : {counts['sd15_checkpoint']:4d}")
+    print(f"  3_2_SD15_Embedding  : {counts['sd15_embedding']:4d}")
+    print(f"  3_3_SD15_LoRA       : {counts['sd15_lora']:4d}")
+    print(f"  4_1_SDXL_checkpoint : {counts['checkpoint']:4d}")
+    print(f"  4_2_SDXL_LoRA       : {counts['lora']:4d}")
+    print(f"  4_3_SDXL_ControlNet : {counts['controlnet']:4d}")
+    print(f"  4_4_SDXL_Embedding  : {counts['embedding']:4d}")
+    print(f"  2_1_errortensors    : {counts['error']:4d}")
 
 
 if __name__ == "__main__":
