@@ -15,6 +15,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from i18n import L  # コンソール出力の言語切替 (英/日)。i18n は torch 非依存なので遅延 import を壊さない
+
 
 def section(title: str) -> None:
     print(f"\n=== {title} ===")
@@ -88,7 +90,8 @@ def main() -> None:
             except Exception as e:
                 kv("session_smoke_test", f"FAIL: {e}")
         else:
-            kv("session_smoke_test", "SKIP (WD14 が HF キャッシュ未取得。tagger.py を一度走らせると検証可能)")
+            kv("session_smoke_test", L("SKIP (WD14 が HF キャッシュ未取得。tagger.py を一度走らせると検証可能)",
+                                       "SKIP (WD14 not in HF cache; run tagger.py once to enable this check)"))
     except Exception as e:
         kv("onnxruntime", f"NOT IMPORTABLE: {e}")
 

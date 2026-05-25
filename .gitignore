@@ -259,4 +259,5 @@ ComfyUI/
 !5_1_generated/output generated PNG picture(included prompt).txt
 5_2_upscaled/*
 !5_2_upscaled/output upscaled PNG picture(included prompt).txt
+workflow_dump/
 tensors_cache.toml

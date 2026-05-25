@@ -32,6 +32,7 @@ except ModuleNotFoundError:
 import tomli_w
 
 from common import (
+    L,
     classify_tensor,
     convert_to_safetensors,
     detect_controlnet_version,
@@ -85,7 +86,7 @@ def save_cache(cache: dict) -> None:
     try:
         CACHE_FILE.write_text(tomli_w.dumps(cache), encoding="utf-8")
     except Exception as e:
-        print(f"キャッシュ保存失敗: {e}", flush=True)
+        print(L(f"キャッシュ保存失敗: {e}", f"Cache save failed: {e}"), flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,19 +186,23 @@ def check_tensors() -> dict:
         print(f"[zip] {path.name} ({_human_size(path.stat().st_size)})", flush=True)
         try:
             n = _safe_extract_tensors(path, TENSORS_DIR)
-            print(f"  展開 {n} 件 → 2_0_tensors / 元 zip → 2_1_errortensors", flush=True)
+            print(L(f"  展開 {n} 件 → 2_0_tensors / 元 zip → 2_1_errortensors",
+                    f"  extracted {n} file(s) → 2_0_tensors / original zip → 2_1_errortensors"), flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
         except Exception as e:
-            print(f"  展開失敗 ({e}) → 2_1_errortensors", flush=True)
+            print(L(f"  展開失敗 ({e}) → 2_1_errortensors",
+                    f"  extraction failed ({e}) → 2_1_errortensors"), flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
 
     for path in sorted([*TENSORS_DIR.glob("*.ckpt"), *TENSORS_DIR.glob("*.pt"), *TENSORS_DIR.glob("*.bin")]):
-        print(f"[変換] {path.name} ({_human_size(path.stat().st_size)})", flush=True)
+        print(L(f"[変換] {path.name} ({_human_size(path.stat().st_size)})",
+                f"[convert] {path.name} ({_human_size(path.stat().st_size)})"), flush=True)
         try:
             convert_to_safetensors(path)
             path.unlink()
         except Exception as e:
-            print(f"  変換失敗 ({e}) → 2_1_errortensors", flush=True)
+            print(L(f"  変換失敗 ({e}) → 2_1_errortensors",
+                    f"  conversion failed ({e}) → 2_1_errortensors"), flush=True)
             shutil.move(str(path), str(ERROR_DIR / path.name))
 
     # ---- Phase 2a: scan + hash ----
@@ -229,7 +234,8 @@ def check_tensors() -> dict:
             try:
                 digest = file_sha256(st)
             except Exception as e:
-                print(f"  ハッシュ失敗 ({e}) → 2_9_error", flush=True)
+                print(L(f"  ハッシュ失敗 ({e}) → 2_9_error",
+                        f"  hash failed ({e}) → 2_9_error"), flush=True)
                 shutil.move(str(st), str(ERROR_DIR / st.name))
                 cache.pop(key, None)
                 continue
@@ -252,12 +258,14 @@ def check_tensors() -> dict:
         keeper = group_sorted[0]
         for old_item in group_sorted[1:]:
             old_path, _, _, old_key = old_item
-            print(f"  重複: {old_path.name} (古い、mtime={old_path.stat().st_mtime:.0f}) "
-                  f"← keeper={keeper[0].name} → 2_9_error", flush=True)
+            print(L(f"  重複: {old_path.name} (古い、mtime={old_path.stat().st_mtime:.0f}) "
+                    f"← keeper={keeper[0].name} → 2_9_error",
+                    f"  duplicate: {old_path.name} (older, mtime={old_path.stat().st_mtime:.0f}) "
+                    f"← keeper={keeper[0].name} → 2_9_error"), flush=True)
             try:
                 shutil.move(str(old_path), str(ERROR_DIR / old_path.name))
             except Exception as e:
-                print(f"    移動失敗: {e}", flush=True)
+                print(L(f"    移動失敗: {e}", f"    move failed: {e}"), flush=True)
             cache.pop(old_key, None)
         survivors.append(keeper)
 
@@ -296,7 +304,8 @@ def check_tensors() -> dict:
                 key = new_key
                 print(f"  {st.name}: {kind} → {target_dir.name}", flush=True)
             except Exception as e:
-                print(f"  移動失敗 ({st.name} → {target_dir.name}): {e}", flush=True)
+                print(L(f"  移動失敗 ({st.name} → {target_dir.name}): {e}",
+                        f"  move failed ({st.name} → {target_dir.name}): {e}"), flush=True)
                 continue
 
         # ERROR_DIR に行ったものは cache から外す (再分類対象にしない、ユーザ手動運用)
@@ -389,7 +398,7 @@ def update_sdxl_lora_toml() -> int:
 def main() -> None:
     counts = check_tensors()
     print()
-    print("=== 振り分け結果 ===")
+    print(L("=== 振り分け結果 ===", "=== Triage Results ==="))
     print(f"  3_1_SD15_checkpoint : {counts['sd15_checkpoint']:4d}")
     print(f"  3_2_SD15_Embedding  : {counts['sd15_embedding']:4d}")
     print(f"  3_3_SD15_LoRA       : {counts['sd15_lora']:4d}")
@@ -404,5 +413,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n中断")
+        print(L("\n中断", "\nInterrupted"))
         sys.exit(0)

@@ -39,6 +39,9 @@ import torch
 from PIL import Image
 from safetensors.torch import save_file
 
+# コンソール出力の言語切替 (英/日)。再エクスポートして from common import L を可能にする。
+from i18n import L, LANG, set_lang  # noqa: F401
+
 # --------------------------------------------------------------------------- #
 # 定数 / ディレクトリ構成
 # --------------------------------------------------------------------------- #
@@ -663,7 +666,8 @@ def load_base_settings() -> dict[str, dict]:
         if um_raw.lower() in ("", "anime", "real", "mix"):
             um = um_raw
         else:
-            print(f"  [base_setting] {k!r}: upscale_model={um_raw!r} は不正値 → '' に正規化")
+            print(L(f"  [base_setting] {k!r}: upscale_model={um_raw!r} は不正値 → '' に正規化",
+                    f"  [base_setting] {k!r}: upscale_model={um_raw!r} is invalid → normalized to ''"))
             um = ""
         out[k] = {
             "max_score": mx, "min_score": mn,
@@ -1017,10 +1021,10 @@ def convert_to_safetensors(path: Path) -> Path:
         if not sd:
             sd = _flatten_tensors(raw)
     else:
-        raise ValueError(f"対応できない形式: {type(raw).__name__}")
+        raise ValueError(L(f"対応できない形式: {type(raw).__name__}", f"unsupported format: {type(raw).__name__}"))
 
     if not sd:
-        raise ValueError("Tensor が見つかりません")
+        raise ValueError(L("Tensor が見つかりません", "no tensors found"))
     sd = {k: v.contiguous() for k, v in sd.items()}
     save_file(sd, str(out))
     return out
@@ -1056,7 +1060,7 @@ def save_cache(cache: dict) -> None:
     try:
         CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"キャッシュ保存失敗: {e}", flush=True)
+        print(L(f"キャッシュ保存失敗: {e}", f"cache save failed: {e}"), flush=True)
 
 
 def _is_torch_zip(path: Path) -> bool:
@@ -1135,7 +1139,7 @@ def migrate_high_to_xl(cache: dict | None = None, verbose: bool = False) -> int:
                 cache.pop(key, None)
                 moved += 1
             except Exception as e:
-                print(f"  移動失敗: {e}", flush=True)
+                print(L(f"  移動失敗: {e}", f"  move failed: {e}"), flush=True)
             continue
         new_path = target / st.name
         if new_path.exists():
@@ -1144,7 +1148,7 @@ def migrate_high_to_xl(cache: dict | None = None, verbose: bool = False) -> int:
                 shutil.move(str(st), str(LOW_DIR / st.name))
                 cache.pop(key, None)
             except Exception as e:
-                print(f"  移動失敗: {e}", flush=True)
+                print(L(f"  移動失敗: {e}", f"  move failed: {e}"), flush=True)
             continue
         try:
             shutil.move(str(st), str(new_path))
@@ -1154,7 +1158,8 @@ def migrate_high_to_xl(cache: dict | None = None, verbose: bool = False) -> int:
             if verbose:
                 print(f"[migrate] {st.name} → {target.name}", flush=True)
         except Exception as e:
-            print(f"  移動失敗 ({st.name} → {target.name}): {e}", flush=True)
+            print(L(f"  移動失敗 ({st.name} → {target.name}): {e}",
+                    f"  move failed ({st.name} → {target.name}): {e}"), flush=True)
     if save_at_end and moved > 0:
         save_cache(cache)
     return moved
@@ -1204,22 +1209,27 @@ def check_tensors() -> tuple[list[Path], list[tuple[Path, str | None]], list[Pat
         try:
             n = _safe_extract_tensors(path, TENSORS_DIR)
             if n > 0:
-                print(f"  展開 {n} 件 → 2_0_tensors / 元は 2_9_1_lowtensors", flush=True)
+                print(L(f"  展開 {n} 件 → 2_0_tensors / 元は 2_9_1_lowtensors",
+                        f"  extracted {n} file(s) → 2_0_tensors / original → 2_9_1_lowtensors"), flush=True)
                 shutil.move(str(path), str(LOW_DIR / path.name))
             else:
-                print(f"  展開対象なし → 2_9_1_lowtensors", flush=True)
+                print(L(f"  展開対象なし → 2_9_1_lowtensors",
+                        f"  nothing to extract → 2_9_1_lowtensors"), flush=True)
                 shutil.move(str(path), str(LOW_DIR / path.name))
         except Exception as e:
-            print(f"  展開失敗 ({e}) → 2_9_1_lowtensors", flush=True)
+            print(L(f"  展開失敗 ({e}) → 2_9_1_lowtensors",
+                    f"  extraction failed ({e}) → 2_9_1_lowtensors"), flush=True)
             shutil.move(str(path), str(LOW_DIR / path.name))
 
     for path in sorted([*TENSORS_DIR.glob("*.ckpt"), *TENSORS_DIR.glob("*.pt"), *TENSORS_DIR.glob("*.bin")]):
-        print(f"[変換] {path.name} ({_human_size(path.stat().st_size)})", flush=True)
+        print(L(f"[変換] {path.name} ({_human_size(path.stat().st_size)})",
+                f"[convert] {path.name} ({_human_size(path.stat().st_size)})"), flush=True)
         try:
             convert_to_safetensors(path)
             path.unlink()
         except Exception as e:
-            print(f"  変換失敗 ({e}) → 2_9_1_lowtensors", flush=True)
+            print(L(f"  変換失敗 ({e}) → 2_9_1_lowtensors",
+                    f"  conversion failed ({e}) → 2_9_1_lowtensors"), flush=True)
             shutil.move(str(path), str(LOW_DIR / path.name))
 
     # ---- Phase 2a: 全 typed dir の safetensors を hash 取得 ----
@@ -1263,7 +1273,8 @@ def check_tensors() -> tuple[list[Path], list[tuple[Path, str | None]], list[Pat
             try:
                 digest = file_sha256(st)
             except Exception as e:
-                print(f"  ハッシュ失敗 ({e}) → 2_9_1_lowtensors", flush=True)
+                print(L(f"  ハッシュ失敗 ({e}) → 2_9_1_lowtensors",
+                        f"  hash failed ({e}) → 2_9_1_lowtensors"), flush=True)
                 shutil.move(str(st), str(LOW_DIR / st.name))
                 cache.pop(key, None)
                 continue
@@ -1287,12 +1298,14 @@ def check_tensors() -> tuple[list[Path], list[tuple[Path, str | None]], list[Pat
         keeper = group_sorted[0]
         for old_item in group_sorted[1:]:
             old_path, _, _, old_key = old_item
-            print(f"  重複: {old_path.name} (古い、mtime={old_path.stat().st_mtime:.0f}) "
-                  f"← keeper={keeper[0].name} → 2_9_1_lowtensors", flush=True)
+            print(L(f"  重複: {old_path.name} (古い、mtime={old_path.stat().st_mtime:.0f}) "
+                    f"← keeper={keeper[0].name} → 2_9_1_lowtensors",
+                    f"  duplicate: {old_path.name} (older, mtime={old_path.stat().st_mtime:.0f}) "
+                    f"← keeper={keeper[0].name} → 2_9_1_lowtensors"), flush=True)
             try:
                 shutil.move(str(old_path), str(LOW_DIR / old_path.name))
             except Exception as e:
-                print(f"    移動失敗: {e}", flush=True)
+                print(L(f"    移動失敗: {e}", f"    move failed: {e}"), flush=True)
             cache.pop(old_key, None)
         survivors.append(keeper)
 
@@ -1336,7 +1349,8 @@ def check_tensors() -> tuple[list[Path], list[tuple[Path, str | None]], list[Pat
                 else:
                     print(f"  {st.name}: → {target_dir.name}", flush=True)
             except Exception as e:
-                print(f"  移動失敗 ({st.name} → {target_dir.name}): {e}", flush=True)
+                print(L(f"  移動失敗 ({st.name} → {target_dir.name}): {e}",
+                        f"  move failed ({st.name} → {target_dir.name}): {e}"), flush=True)
                 continue
 
         # 退避先 (LOW / HIGH) は使用リストから除外
@@ -1965,7 +1979,7 @@ def unique_output_path(stem: str) -> Path:
         cand = OUT_DIR / f"{stem}_{i}.png"
         if not cand.exists():
             return cand
-    raise RuntimeError("出力先が枯渇しました")
+    raise RuntimeError(L("出力先が枯渇しました", "output path exhausted"))
 
 
 def save_image_no_metadata(img: Image.Image, path: Path) -> None:

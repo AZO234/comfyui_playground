@@ -37,6 +37,7 @@ except ModuleNotFoundError:
 import questionary
 
 from common import (
+    L,
     build_lora_corpus,
     build_prompt,
     load_prompt_config,
@@ -60,7 +61,8 @@ def load_lora_keywords_toml() -> dict:
     try:
         return tomllib.loads(LORA_KEYWORDS_TOML.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[警告] LoRA_keywords.toml パース失敗 ({e})", flush=True)
+        print(L(f"[警告] LoRA_keywords.toml パース失敗 ({e})",
+                f"[WARNING] LoRA_keywords.toml parse failed ({e})"), flush=True)
         return {}
 
 
@@ -170,16 +172,17 @@ def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int,
     for sec_name, entries in sections:
         if not entries:
             continue
-        labels: list[str] = ["(このセクションをスキップ)"]
+        labels: list[str] = [L("(このセクションをスキップ)", "(skip this section)")]
         kws_per_label: list[list[str]] = [[]]
         for ent in entries:
             value = str(ent[0])
             kws = get_entry_keywords(ent, sec_name)
-            tag = f"  [kw: {', '.join(kws)}]" if kws else "  [kw 無し]"
+            tag = f"  [kw: {', '.join(kws)}]" if kws else L("  [kw 無し]", "  [no kw]")
             labels.append(f"{value}{tag}")
             kws_per_label.append(kws)
         choice = questionary.select(
-            f"[{sec_name}] を選択 (Enter で次へ):",
+            L(f"[{sec_name}] を選択 (Enter で次へ):",
+              f"[{sec_name}] select (Enter to continue):"),
             choices=labels, default=labels[0],
         ).ask()
         if choice is None:
@@ -189,10 +192,11 @@ def mode_manual(cfg: dict, loras: list[Path], corpus: dict, n_trials: int,
             all_kws.extend(kws_per_label[idx])
             selected_summary.append(f"[{sec_name}] {entries[idx-1][0]}")
     if selected_summary:
-        print("\n選択:")
+        print(L("\n選択:", "\nSelection:"))
         for s in selected_summary:
             print(f"  {s}")
-    print(f"  → 集約 kw: {', '.join(all_kws) if all_kws else '(空)'}")
+    print(L(f"  → 集約 kw: {', '.join(all_kws) if all_kws else '(空)'}",
+            f"  → aggregated kw: {', '.join(all_kws) if all_kws else '(empty)'}"))
     return run_trials(loras, corpus, all_kws, n_trials=n_trials,
                        n_max=n_max, n_min=n_min)
 
@@ -204,12 +208,14 @@ def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int,
                        n_max: int = 5, n_min: int = 3) -> Counter:
     """ユーザ入力 kw 文字列で抽選。"""
     text = questionary.text(
-        "LoRA キーワードをカンマ区切りで入力 (空 = キャンセル):",
+        L("LoRA キーワードをカンマ区切りで入力 (空 = キャンセル):",
+          "Enter LoRA keywords comma-separated (empty = cancel):"),
     ).ask()
     if not text:
         return Counter()
     kws = [k.strip() for k in text.split(",") if k.strip()]
-    print(f"\n入力 kw: {', '.join(kws)}")
+    print(L(f"\n入力 kw: {', '.join(kws)}",
+            f"\ninput kw: {', '.join(kws)}"))
     return run_trials(loras, corpus, kws, n_trials=n_trials,
                        n_max=n_max, n_min=n_min)
 
@@ -218,45 +224,56 @@ def mode_lora_keyword(loras: list[Path], corpus: dict, n_trials: int,
 # CLI
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="LoRA 選択確率の対話的確認 TUI")
+    ap = argparse.ArgumentParser(
+        description=L("LoRA 選択確率の対話的確認 TUI",
+                      "Interactive TUI to inspect LoRA pick probability"))
     ap.add_argument("--trials", type=int, default=300,
-                    help="抽選試行回数 (既定 300)")
+                    help=L("抽選試行回数 (既定 300)",
+                           "number of draw trials (default 300)"))
     ap.add_argument("--top", type=int, default=30,
-                    help="バーグラフに表示する上位件数 (既定 30)")
+                    help=L("バーグラフに表示する上位件数 (既定 30)",
+                           "top N entries to show in the bar graph (default 30)"))
     ap.add_argument("--lora-stack-min", type=int, default=3,
-                    help="1 試行あたりの重ね掛け LoRA 最小数 (既定 3、generate.py と同既定)")
+                    help=L("1 試行あたりの重ね掛け LoRA 最小数 (既定 3、generate.py と同既定)",
+                           "minimum number of stacked LoRAs per trial (default 3, same as generate.py)"))
     ap.add_argument("--lora-stack-max", type=int, default=5,
-                    help="1 試行あたりの重ね掛け LoRA 最大数 (既定 5、generate.py と同既定)")
+                    help=L("1 試行あたりの重ね掛け LoRA 最大数 (既定 5、generate.py と同既定)",
+                           "maximum number of stacked LoRAs per trial (default 5, same as generate.py)"))
     args = ap.parse_args()
 
-    print("LoRA 列挙中...", end=" ", flush=True)
+    print(L("LoRA 列挙中...", "Enumerating LoRAs..."), end=" ", flush=True)
     loras = sorted(LORA_DIR.glob("*.safetensors"))
-    print(f"{len(loras)} 件")
+    print(L(f"{len(loras)} 件", f"{len(loras)} found"))
     if not loras:
-        raise SystemExit(f"{LORA_DIR} に LoRA がありません")
+        raise SystemExit(L(f"{LORA_DIR} に LoRA がありません",
+                           f"No LoRAs found in {LORA_DIR}"))
 
-    print("LoRA_keywords.toml + corpus 構築...", end=" ", flush=True)
+    print(L("LoRA_keywords.toml + corpus 構築...", "Building LoRA_keywords.toml + corpus..."),
+          end=" ", flush=True)
     kw_data = load_lora_keywords_toml()
     corpus = build_lora_corpus_for_playground(loras, kw_data)
-    print(f"({len(kw_data)} 件登録)")
+    print(L(f"({len(kw_data)} 件登録)", f"({len(kw_data)} entries registered)"))
 
     cfg = load_prompt_config()
 
     MODES = {
-        "random       (prompt.toml をランダム抽選で 300 回)":   "random",
-        "manual       (prompt.toml の各セクションをユーザ選択)": "manual",
-        "lora_keyword (LoRA キーワードを直接入力)":              "lora_keyword",
-        "終了":                                                  None,
+        L("random       (prompt.toml をランダム抽選で 300 回)",
+          "random       (draw from prompt.toml randomly, 300 times)"):   "random",
+        L("manual       (prompt.toml の各セクションをユーザ選択)",
+          "manual       (user selects each section of prompt.toml)"):    "manual",
+        L("lora_keyword (LoRA キーワードを直接入力)",
+          "lora_keyword (enter LoRA keywords directly)"):                "lora_keyword",
+        L("終了", "Quit"):                                               None,
     }
 
     while True:
         print()
         choice = questionary.select(
-            "モード選択 (↑↓ + Enter):",
+            L("モード選択 (↑↓ + Enter):", "Select mode (↑↓ + Enter):"),
             choices=list(MODES.keys()),
         ).ask()
         if choice is None or MODES[choice] is None:
-            print("終了")
+            print(L("終了", "Quit"))
             return
         mode = MODES[choice]
         if mode == "random":
@@ -275,5 +292,5 @@ if __name__ == "__main__":
     try:
         main()
     except (KeyboardInterrupt, EOFError):
-        print("\n中断")
+        print(L("\n中断", "\nInterrupted"))
         sys.exit(0)

@@ -55,6 +55,7 @@ from common import (
     build_lora_corpus,
     pick_n_loras_by_keywords,
     current_gpu_temp,
+    L,
 )
 # A1111 メタ書き込みは pngutil の serializer を流用
 from pngutil import serialize_a1111_parameters, write_text_chunks
@@ -82,6 +83,7 @@ CONTROLNET_DIR   = SDXL_CONTROLNET_DIR
 PROMPTS_DIR      = ROOT / "1_0_prompts"
 GENERATED_DIR    = ROOT / "5_1_generated"
 UPSCALED_DIR     = ROOT / "5_2_upscaled"
+WORKFLOW_DUMP_DIR = ROOT / "workflow_dump"   # --dump-workflow: 組んだ API workflow JSON の出力先
 CHECKPOINT_TOML  = ROOT / "checkpoint.toml"
 LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
 SDXL_LORA_TOML   = ROOT / "SDXL_LoRA.toml"   # SDXL LoRA の subject (pose のみ機能的)
@@ -123,7 +125,7 @@ def _format_comfy_error(body: bytes) -> str:
         data = json.loads(body.decode("utf-8"))
     except Exception:
         text = body.decode("utf-8", "replace").strip()
-        return text[:1500] if text else "(レスポンス本文なし)"
+        return text[:1500] if text else L("(レスポンス本文なし)", "(empty response body)")
     lines: list[str] = []
     err = data.get("error") or {}
     if err:
@@ -152,7 +154,7 @@ def _http_post_json(url: str, body: dict) -> dict:
         try:
             detail = _format_comfy_error(e.read())
         except Exception:
-            detail = "(本文の読取に失敗)"
+            detail = L("(本文の読取に失敗)", "(failed to read response body)")
         raise RuntimeError(f"ComfyUI {e.code} {e.reason} @ {url}\n{detail}") from None
 
 
@@ -210,7 +212,7 @@ def wait_for_completion_ws(prompt_id: str, client_id: str,
     try:
         ws = websocket.create_connection(f"{COMFY_WS}?clientId={client_id}", timeout=30)
     except Exception as e:
-        print(f"  [ws error] {e}、HTTP poll にフォールバック", flush=True)
+        print(L(f"  [ws error] {e}、HTTP poll にフォールバック", f"  [ws error] {e}, falling back to HTTP poll"), flush=True)
         return wait_for_history(prompt_id, timeout=timeout)
 
     pbar: Optional[object] = None
@@ -320,7 +322,7 @@ def write_extra_model_paths() -> bool:
     if old == content:
         return False
     EXTRA_MODEL_PATHS_YAML.write_text(content, encoding="utf-8")
-    print(f"  [extra_model_paths] {EXTRA_MODEL_PATHS_YAML.name} を更新 (model dir 登録)", flush=True)
+    print(L(f"  [extra_model_paths] {EXTRA_MODEL_PATHS_YAML.name} を更新 (model dir 登録)", f"  [extra_model_paths] {EXTRA_MODEL_PATHS_YAML.name} updated (model dir registered)"), flush=True)
     return True
 
 
@@ -405,7 +407,7 @@ def start_comfyui_server(arch: str, ready_timeout: float = 120.0) -> None:
         if get_comfyui_device() is not None:
             return
         time.sleep(2)
-    raise SystemExit(f"ComfyUI server ({arch}) の起動 timeout ({ready_timeout}s)")
+    raise SystemExit(L(f"ComfyUI server ({arch}) の起動 timeout ({ready_timeout}s)", f"ComfyUI server ({arch}) startup timeout ({ready_timeout}s)"))
 
 
 def ensure_comfyui_arch(arch: str, force_restart: bool = False) -> None:
@@ -416,17 +418,17 @@ def ensure_comfyui_arch(arch: str, force_restart: bool = False) -> None:
     cur = get_comfyui_device()
     if cur is None:
         # サーバ停止中 → そのまま起動
-        print(f"  ComfyUI 未起動 → {arch} で新規起動", flush=True)
+        print(L(f"  ComfyUI 未起動 → {arch} で新規起動", f"  ComfyUI not running → starting fresh with {arch}"), flush=True)
         start_comfyui_server(arch)
         return
     if cur == arch and not force_restart:
         # 一致 + 再起動不要 → 何もしない
         return
-    reason = "model path 更新で設定再読込" if (cur == arch and force_restart) else f"device mismatch (現 {cur}, 要 {arch})"
-    print(f"  ComfyUI 再起動中... ({reason})", flush=True)
+    reason = L("model path 更新で設定再読込", "reloading config after model path update") if (cur == arch and force_restart) else L(f"device mismatch (現 {cur}, 要 {arch})", f"device mismatch (current {cur}, required {arch})")
+    print(L(f"  ComfyUI 再起動中... ({reason})", f"  ComfyUI restarting... ({reason})"), flush=True)
     kill_comfyui_server()
     start_comfyui_server(arch)
-    print(f"  ComfyUI server を {arch} で再起動完了", flush=True)
+    print(L(f"  ComfyUI server を {arch} で再起動完了", f"  ComfyUI server restarted with {arch}"), flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -744,7 +746,7 @@ def load_checkpoint_toml() -> dict:
     try:
         return tomllib.loads(CHECKPOINT_TOML.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[警告] checkpoint.toml パース失敗 ({e})、空として扱う", flush=True)
+        print(L(f"[警告] checkpoint.toml パース失敗 ({e})、空として扱う", f"[warn] checkpoint.toml parse failed ({e}), treating as empty"), flush=True)
         return {}
 
 
@@ -753,7 +755,7 @@ def save_checkpoint_toml(data: dict) -> None:
     try:
         CHECKPOINT_TOML.write_text(tomli_w.dumps(data), encoding="utf-8")
     except Exception as e:
-        print(f"[警告] checkpoint.toml 保存失敗: {e}", flush=True)
+        print(L(f"[警告] checkpoint.toml 保存失敗: {e}", f"[warn] checkpoint.toml save failed: {e}"), flush=True)
 
 
 def reload_update_save_checkpoint_toml(name: str, elapsed_s: float, data: dict) -> None:
@@ -780,7 +782,7 @@ def load_lora_keywords_toml() -> dict:
     try:
         return tomllib.loads(LORA_KEYWORDS_TOML.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[警告] LoRA_keywords.toml パース失敗 ({e})、空として扱う", flush=True)
+        print(L(f"[警告] LoRA_keywords.toml パース失敗 ({e})、空として扱う", f"[warn] LoRA_keywords.toml parse failed ({e}), treating as empty"), flush=True)
         return {}
 
 
@@ -792,7 +794,7 @@ def load_sdxl_lora_subjects() -> dict[str, str]:
     try:
         data = tomllib.loads(SDXL_LORA_TOML.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[警告] SDXL_LoRA.toml パース失敗 ({e})、空として扱う", flush=True)
+        print(L(f"[警告] SDXL_LoRA.toml パース失敗 ({e})、空として扱う", f"[warn] SDXL_LoRA.toml parse failed ({e}), treating as empty"), flush=True)
         return {}
     return {stem: str((v or {}).get("subject") or "").strip().lower() for stem, v in data.items()}
 
@@ -851,7 +853,7 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
         for c in candidates:
             if c.stem == fixed_name or c.name == fixed_name:
                 return c
-        raise SystemExit(f"ControlNet が見つかりません: {fixed_name}")
+        raise SystemExit(L(f"ControlNet が見つかりません: {fixed_name}", f"ControlNet not found: {fixed_name}"))
 
     if force_openpose:
         matched = [c for c in candidates
@@ -859,8 +861,10 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
                    or c.stem.lower().endswith("pose")]
         if not matched:
             raise SystemExit(
-                "--pose 指定だが 4_3_SDXL_ControlNet/ に openpose 系 ControlNet が見つかりません "
-                "(stem に 'openpose' / '_pose' / 末尾 'pose' を含むファイルを配置)"
+                L("--pose 指定だが 4_3_SDXL_ControlNet/ に openpose 系 ControlNet が見つかりません "
+                  "(stem に 'openpose' / '_pose' / 末尾 'pose' を含むファイルを配置)",
+                  "--pose specified but no openpose ControlNet found in 4_3_SDXL_ControlNet/ "
+                  "(place a file with 'openpose' / '_pose' / ending in 'pose' in its stem)")
             )
         return random.choice(matched)
 
@@ -916,6 +920,25 @@ def _submit_and_fetch(workflow: dict, client_id: str, save_node: str = "7"):
     return data, info, outputs
 
 
+def _dump_workflow(workflow: dict, kind: str) -> Path:
+    """組んだ API 形式 workflow を JSON ファイルに保存し、パスを返す。
+
+    ComfyUI v0.21 のフロントは API 形式 JSON をキャンバスに **ドラッグ＆ドロップ**
+    すると自動レイアウトでノードグラフに展開してくれる。つまりこの JSON を
+    WebUI (http://127.0.0.1:8188) に放り込めば「generate.py が実際に組んだグラフ」が
+    そのまま絵で見える。出力先は workflow_dump/<時刻>_<kind>.json。
+    """
+    WORKFLOW_DUMP_DIR.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    out = WORKFLOW_DUMP_DIR / f"{ts}_{kind}.json"
+    out.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(L(f"  [dump] workflow ({kind}, {len(workflow)} nodes) → "
+            f"workflow_dump/{out.name}  ※WebUI canvas にドロップで可視化",
+            f"  [dump] workflow ({kind}, {len(workflow)} nodes) → "
+            f"workflow_dump/{out.name}  drop onto WebUI canvas to visualize"), flush=True)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # ADetailer (Ultralytics) モデルの自動 DL
 # --------------------------------------------------------------------------- #
@@ -937,18 +960,20 @@ def ensure_adetailer_model(rel_name: Optional[str]) -> Optional[str]:
     if full.is_file():
         return rel_name
     basename = full.name
-    print(f"  [adetailer] {rel_name} が無い → {_ADETAILER_HF_REPO} から DL 試行...", flush=True)
+    print(L(f"  [adetailer] {rel_name} が無い → {_ADETAILER_HF_REPO} から DL 試行...", f"  [adetailer] {rel_name} not found → attempting download from {_ADETAILER_HF_REPO}..."), flush=True)
     try:
         from huggingface_hub import hf_hub_download
         import shutil
         src = hf_hub_download(_ADETAILER_HF_REPO, basename)
         full.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, full)
-        print(f"  [adetailer] DL 完了 → {full} ({full.stat().st_size // 1024} KB)", flush=True)
+        print(L(f"  [adetailer] DL 完了 → {full} ({full.stat().st_size // 1024} KB)", f"  [adetailer] download complete → {full} ({full.stat().st_size // 1024} KB)"), flush=True)
         return rel_name
     except Exception as e:
-        print(f"  [adetailer][warn] {basename} は自動 DL できない ({type(e).__name__})。"
-              f"この detector を無効化 (手動で {full} に配置すれば有効化)", flush=True)
+        print(L(f"  [adetailer][warn] {basename} は自動 DL できない ({type(e).__name__})。"
+                f"この detector を無効化 (手動で {full} に配置すれば有効化)",
+                f"  [adetailer][warn] {basename} cannot be auto-downloaded ({type(e).__name__}). "
+                f"Disabling this detector (place it manually at {full} to enable)"), flush=True)
         return None
 
 
@@ -1019,7 +1044,7 @@ def resolve_png_path(name: str) -> Path:
     for cand in (p, PROMPTS_DIR / name, PROMPTS_DIR / f"{name}.png"):
         if cand.exists():
             return cand
-    raise SystemExit(f"PNG が見つかりません: {name} (1_0_prompts/ を確認)")
+    raise SystemExit(L(f"PNG が見つかりません: {name} (1_0_prompts/ を確認)", f"PNG not found: {name} (check 1_0_prompts/)"))
 
 
 def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
@@ -1039,7 +1064,7 @@ def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
             "style": "",
             "family": fam,
         }
-        print(f"  checkpoint.toml に {name} を初期登録 (slow=fast={elapsed}s, family={fam or '?'})", flush=True)
+        print(L(f"  checkpoint.toml に {name} を初期登録 (slow=fast={elapsed}s, family={fam or '?'})", f"  checkpoint.toml: registered {name} (slow=fast={elapsed}s, family={fam or '?'})"), flush=True)
     else:
         cur_fast = int(entry.get("fast", elapsed))
         cur_slow = int(entry.get("slow", elapsed))
@@ -1048,7 +1073,7 @@ def update_checkpoint_timing(name: str, elapsed_s: float, data: dict) -> None:
         if new_fast != cur_fast or new_slow != cur_slow:
             entry["fast"] = new_fast
             entry["slow"] = new_slow
-            print(f"  checkpoint.toml 更新 {name}: fast={new_fast}s slow={new_slow}s", flush=True)
+            print(L(f"  checkpoint.toml 更新 {name}: fast={new_fast}s slow={new_slow}s", f"  checkpoint.toml updated {name}: fast={new_fast}s slow={new_slow}s"), flush=True)
         # like / inference / style はユーザ管理、触らない
 
 
@@ -1133,7 +1158,7 @@ def _resolve_checkpoint_name(name: str, dirs: Optional[list[Path]] = None) -> Pa
     for c in candidates:
         if c.stem == name or c.name == name:
             return c
-    raise SystemExit(f"checkpoint が見つかりません: {name}")
+    raise SystemExit(L(f"checkpoint が見つかりません: {name}", f"checkpoint not found: {name}"))
 
 
 def pick_checkpoint(
@@ -1158,7 +1183,7 @@ def pick_checkpoint(
     dirs = pool_dirs or [CHECKPOINT_DIR]
     candidates = _gather_checkpoints(dirs)
     if not candidates:
-        raise SystemExit(f"{', '.join(d.name for d in dirs)} に checkpoint がありません")
+        raise SystemExit(L(f"{', '.join(d.name for d in dirs)} に checkpoint がありません", f"no checkpoints found in {', '.join(d.name for d in dirs)}"))
     if fixed_name:
         return _resolve_checkpoint_name(fixed_name, dirs)
 
@@ -1281,7 +1306,7 @@ def get_prompt_for_iteration(
 
     if mode == "sentence":
         if not sentence:
-            raise SystemExit("--prompt sentence には --sentence \"...\" が必要")
+            raise SystemExit(L("--prompt sentence には --sentence \"...\" が必要", "--prompt sentence requires --sentence \"...\""))
         cfg = load_prompt_config()
         positive = normalize_emphasis(sentence)
         negative = normalize_emphasis(str(cfg.get("negative_always") or ""))
@@ -1309,10 +1334,10 @@ def get_prompt_for_iteration(
 
     if mode == "png":
         if png_path is None:
-            raise SystemExit("--prompt png には --png <PNG> が必要")
+            raise SystemExit(L("--prompt png には --png <PNG> が必要", "--prompt png requires --png <PNG>"))
         positive, negative, kws = parse_png_prompt_metadata(png_path)
         if not positive:
-            print(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", flush=True)
+            print(L(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", f"  [info] no metadata in PNG, falling back to auto mode"), flush=True)
             cfg = load_prompt_config()
             pos, neg, kws, many = build_prompt(cfg)
             extras["many"] = many
@@ -1321,13 +1346,13 @@ def get_prompt_for_iteration(
 
     if mode == "original":
         if png_path is None:
-            raise SystemExit("--prompt original には --png <PNG> が必要")
+            raise SystemExit(L("--prompt original には --png <PNG> が必要", "--prompt original requires --png <PNG>"))
         meta = parse_png_full_metadata(png_path)
         positive = meta["positive"]
         negative = meta["negative"]
         kws      = meta["lora_keywords"]
         if not positive:
-            print(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", flush=True)
+            print(L(f"  [info] PNG にメタ情報なし、auto モードにフォールバック", f"  [info] no metadata in PNG, falling back to auto mode"), flush=True)
             cfg = load_prompt_config()
             pos, neg, kws, many = build_prompt(cfg)
             extras["many"] = many
@@ -1339,7 +1364,7 @@ def get_prompt_for_iteration(
             extras["loras"] = meta["loras"]
         return positive, negative, kws, extras
 
-    raise SystemExit(f"--prompt {mode} は未対応")
+    raise SystemExit(L(f"--prompt {mode} は未対応", f"--prompt {mode} is not supported"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1419,115 +1444,184 @@ def save_with_a1111_metadata(
 # --------------------------------------------------------------------------- #
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="ComfyUI HTTP API 経由で SDXL 画像を連続生成する (Phase 1: --prompt auto のみ)"
+        description=L("ComfyUI HTTP API 経由で SDXL 画像を連続生成する (Phase 1: --prompt auto のみ)",
+                      "Continuously generate SDXL images via ComfyUI HTTP API (Phase 1: --prompt auto only)")
     )
     ap.add_argument("--prompt", choices=["auto", "sentence", "png", "original"], default="auto",
-                    help="プロンプト入力モード。"
-                         "auto=prompt.toml 駆動 / "
-                         "sentence=--sentence で直接 / "
-                         "png=PNG メタから読出 / "
-                         "original=PNG メタの checkpoint+LoRA+prompt 全部を流用")
+                    help=L("プロンプト入力モード。"
+                           "auto=prompt.toml 駆動 / "
+                           "sentence=--sentence で直接 / "
+                           "png=PNG メタから読出 / "
+                           "original=PNG メタの checkpoint+LoRA+prompt 全部を流用",
+                           "prompt input mode. "
+                           "auto=prompt.toml driven / "
+                           "sentence=direct via --sentence / "
+                           "png=read from PNG metadata / "
+                           "original=reuse all PNG metadata (checkpoint+LoRA+prompt)"))
     ap.add_argument("--sentence", type=str, default=None,
-                    help="--prompt sentence のとき、文章プロンプト。`**word**` 強調記法 OK")
+                    help=L("--prompt sentence のとき、文章プロンプト。`**word**` 強調記法 OK",
+                           "sentence prompt for --prompt sentence. `**word**` emphasis syntax supported"))
     ap.add_argument("--lora-keywords", type=str, default=None,
-                    help="--prompt sentence のとき、LoRA キーワード列 (カンマ区切り)")
+                    help=L("--prompt sentence のとき、LoRA キーワード列 (カンマ区切り)",
+                           "LoRA keyword list for --prompt sentence (comma-separated)"))
     ap.add_argument("--png", type=str, default=None,
-                    help="画質アップ refine 用 PNG (1_0_prompts/ 配下 or 絶対パス)。"
-                         "その画像を SDXL img2img で描き直して SD15→SDXL 画質に上げる (1 枚で終了)")
+                    help=L("画質アップ refine 用 PNG (1_0_prompts/ 配下 or 絶対パス)。"
+                           "その画像を SDXL img2img で描き直して SD15→SDXL 画質に上げる (1 枚で終了)",
+                           "PNG for quality-up refine (under 1_0_prompts/ or absolute path). "
+                           "Redraws the image via SDXL img2img to upgrade quality to SDXL level (single image, then exits)"))
     ap.add_argument("--png-sentence", type=str, default=None,
-                    help="PNG の埋込プロンプト『文章』で生成する PNG (画像は使わない)。"
-                         "統合抽選 (SD15/SDXL→1/2段) で連続量産。--prompt original と併用で全メタ流用")
+                    help=L("PNG の埋込プロンプト『文章』で生成する PNG (画像は使わない)。"
+                           "統合抽選 (SD15/SDXL→1/2段) で連続量産。--prompt original と併用で全メタ流用",
+                           "PNG whose embedded prompt sentence is used for generation (image itself is not used). "
+                           "Continuous high-volume generation via unified draw (SD15/SDXL→1/2-stage). "
+                           "Combine with --prompt original to reuse all metadata"))
     ap.add_argument("--refine-denoise", type=float, default=0.5,
-                    help="--png refine の img2img denoise (既定 0.5。低=元忠実 / 高=SDXL が大きく描き直す)")
+                    help=L("--png refine の img2img denoise (既定 0.5。低=元忠実 / 高=SDXL が大きく描き直す)",
+                           "--png refine img2img denoise (default 0.5. low=faithful to original / high=SDXL redraws more)"))
     ap.add_argument("--controlnet", type=str, default=None,
-                    help="ControlNet を固定 (name or stem)")
+                    help=L("ControlNet を固定 (name or stem)", "fix ControlNet (name or stem)"))
     ap.add_argument("--no-controlnet", action="store_true",
-                    help="ControlNet を完全 OFF (--prompt png でソース PNG があっても使わない)")
+                    help=L("ControlNet を完全 OFF (--prompt png でソース PNG があっても使わない)",
+                           "disable ControlNet entirely (even if a source PNG is present with --prompt png)"))
     ap.add_argument("--controlnet-strength", type=float, default=0.7,
-                    help="controlnet_conditioning_scale (既定 0.7)")
+                    help=L("controlnet_conditioning_scale (既定 0.7)", "controlnet_conditioning_scale (default 0.7)"))
     ap.add_argument("--pose", type=str, default=None,
-                    help="openpose 用 ソース PNG (絶対パス or 1_0_prompts/NAME)。"
-                         "指定すると DWPose 抽出 → openpose ControlNet を強制適用 "
-                         "(4_3_SDXL_ControlNet/ に stem に 'openpose'/'_pose' を含むファイルが必要)。"
-                         "--prompt mode とは独立 (sentence/auto/png/original 全モードで併用可)")
+                    help=L("openpose 用 ソース PNG (絶対パス or 1_0_prompts/NAME)。"
+                           "指定すると DWPose 抽出 → openpose ControlNet を強制適用 "
+                           "(4_3_SDXL_ControlNet/ に stem に 'openpose'/'_pose' を含むファイルが必要)。"
+                           "--prompt mode とは独立 (sentence/auto/png/original 全モードで併用可)",
+                           "source PNG for OpenPose (absolute path or 1_0_prompts/NAME). "
+                           "When specified, extracts DWPose and forces openpose ControlNet "
+                           "(requires a file with 'openpose'/'_pose' in its stem in 4_3_SDXL_ControlNet/). "
+                           "Independent of --prompt mode (works with sentence/auto/png/original)"))
     ap.add_argument("--pose-strength", type=float, default=1.0,
-                    help="--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)")
+                    help=L("--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)",
+                           "controlnet_conditioning_scale when --pose is specified (default 1.0, stronger works better for skeleton)"))
     ap.add_argument("--gear", choices=["low", "high"], default="high",
-                    help="low=ラフ (steps 30) / high=本番 (steps 100、既定)")
+                    help=L("low=ラフ (steps 30) / high=本番 (steps 100、既定)",
+                           "low=rough (steps 30) / high=production (steps 100, default)"))
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
-                    help="ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)")
+                    help=L("ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)",
+                           "ComfyUI device selection (informational in Phase 1; determined at ComfyUI startup)"))
     ap.add_argument("--version", choices=["auto", "sdxl", "sd15"], default="auto",
-                    help="checkpoint 抽選プールの絞り込み。auto=SD15+SDXL 統合 (既定) / "
-                         "sdxl=4_1 のみ / sd15=3_1 のみ。当選 checkpoint の版で 1 段/2 段が決まる "
-                         "(gear high + SD15 当選 → SD15 下書き→SDXL 清書の 2 段)")
+                    help=L("checkpoint 抽選プールの絞り込み。auto=SD15+SDXL 統合 (既定) / "
+                           "sdxl=4_1 のみ / sd15=3_1 のみ。当選 checkpoint の版で 1 段/2 段が決まる "
+                           "(gear high + SD15 当選 → SD15 下書き→SDXL 清書の 2 段)",
+                           "narrow the checkpoint draw pool. auto=unified SD15+SDXL (default) / "
+                           "sdxl=4_1 only / sd15=3_1 only. The drawn checkpoint's version determines 1-stage or 2-stage "
+                           "(gear high + SD15 drawn → SD15 draft→SDXL clean two-stage chain)"))
     ap.add_argument("--chain-denoise", type=float, default=0.45,
-                    help="gear high で SD15 が当選したときの SDXL 清書 img2img の denoise "
-                         "(既定 0.45。低=下書きの構図/色を保持、高=SDXL が描き直す)")
+                    help=L("gear high で SD15 が当選したときの SDXL 清書 img2img の denoise "
+                           "(既定 0.45。低=下書きの構図/色を保持、高=SDXL が描き直す)",
+                           "SDXL clean img2img denoise when SD15 is drawn in gear high "
+                           "(default 0.45. low=preserves draft composition/color, high=SDXL redraws more)"))
     ap.add_argument("--save-draft", action=argparse.BooleanOptionalAction, default=True,
-                    help="2 段チェーン時、中間の SD15 下書きを 3_9_SD15_rough に保存 (既定 ON、--no-save-draft で OFF)")
+                    help=L("2 段チェーン時、中間の SD15 下書きを 3_9_SD15_rough に保存 (既定 ON、--no-save-draft で OFF)",
+                           "save intermediate SD15 draft to 3_9_SD15_rough during two-stage chain (default ON, --no-save-draft to disable)"))
     ap.add_argument("--checkpoint", type=str, default=None,
-                    help="checkpoint を固定。NAME or NAME.safetensors")
+                    help=L("checkpoint を固定。NAME or NAME.safetensors",
+                           "fix checkpoint. NAME or NAME.safetensors"))
     ap.add_argument("--cfg-scale", type=float, default=7.0)
     ap.add_argument("--width", type=int, default=None,
-                    help="生成幅 (未指定: sdxl=1024 / sd15=512)")
+                    help=L("生成幅 (未指定: sdxl=1024 / sd15=512)", "generation width (default: sdxl=1024 / sd15=512)"))
     ap.add_argument("--height", type=int, default=None,
-                    help="生成高さ (未指定: sdxl=1024 / sd15=512)")
+                    help=L("生成高さ (未指定: sdxl=1024 / sd15=512)", "generation height (default: sdxl=1024 / sd15=512)"))
     ap.add_argument("--many-width", type=int, default=None,
-                    help="many=true のとき使う幅 (未指定: sdxl=1216 / sd15=768、横長で複数人の融合抑制)")
+                    help=L("many=true のとき使う幅 (未指定: sdxl=1216 / sd15=768、横長で複数人の融合抑制)",
+                           "width when many=true (default: sdxl=1216 / sd15=768, landscape to suppress multi-person merging)"))
     ap.add_argument("--many-height", type=int, default=None,
-                    help="many=true のとき使う高さ (未指定: sdxl=832 / sd15=512)")
+                    help=L("many=true のとき使う高さ (未指定: sdxl=832 / sd15=512)",
+                           "height when many=true (default: sdxl=832 / sd15=512)"))
     ap.add_argument("--many", action="store_true",
-                    help="複数人モードを強制 ON (横長キャンバスで生成)。--sentence/--png 等 "
-                         "prompt.toml 由来でない入力で複数人を描くとき指定。auto モードでは "
-                         "who エントリの many 判定と OR で効く")
+                    help=L("複数人モードを強制 ON (横長キャンバスで生成)。--sentence/--png 等 "
+                           "prompt.toml 由来でない入力で複数人を描くとき指定。auto モードでは "
+                           "who エントリの many 判定と OR で効く",
+                           "force multi-person mode ON (generates on landscape canvas). "
+                           "Use when drawing multiple people with --sentence/--png or other non-prompt.toml inputs. "
+                           "In auto mode, ORed with the who-entry many flag"))
     ap.add_argument("--sampler", type=str, default="dpmpp_2m")
     ap.add_argument("--scheduler", type=str, default="karras")
     ap.add_argument("--lora-scale", type=float, default=0.8,
-                    help="LoRA n 個重ね掛け時の合計 scale (各 LoRA strength = lora_scale/n、既定 0.8)")
+                    help=L("LoRA n 個重ね掛け時の合計 scale (各 LoRA strength = lora_scale/n、既定 0.8)",
+                           "total scale when stacking n LoRAs (each LoRA strength = lora_scale/n, default 0.8)"))
     ap.add_argument("--lora-stack-min", type=int, default=3,
-                    help="1 枚あたりの重ね掛け LoRA 最小数 (既定 3、1 で「下限 1」)")
+                    help=L("1 枚あたりの重ね掛け LoRA 最小数 (既定 3、1 で「下限 1」)",
+                           "minimum number of stacked LoRAs per image (default 3, set 1 for min of 1)"))
     ap.add_argument("--lora-stack-max", type=int, default=5,
-                    help="1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 5、"
-                         "1 で重ね無し、0 で完全 OFF)")
+                    help=L("1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 5、"
+                           "1 で重ね無し、0 で完全 OFF)",
+                           "maximum number of stacked LoRAs per image (random.randint(min, max), default 5, "
+                           "1 for no stacking, 0 to disable entirely)"))
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
-                    help="Real-ESRGAN x4 アップスケール (5_2_upscaled に出力)。"
-                         "既定: gear high で ON / gear low で OFF。明示すれば上書き")
+                    help=L("Real-ESRGAN x4 アップスケール (5_2_upscaled に出力)。"
+                           "既定: gear high で ON / gear low で OFF。明示すれば上書き",
+                           "Real-ESRGAN x4 upscale (output to 5_2_upscaled). "
+                           "Default: ON for gear high / OFF for gear low. Explicit flag overrides"))
     ap.add_argument("--upscale-model", type=str, default=None,
-                    help="アップスケール用 Real-ESRGAN モデル名 (既定: style=anime → anime6B、"
-                         "real → x4plus、mix/空 → anime6B)")
+                    help=L("アップスケール用 Real-ESRGAN モデル名 (既定: style=anime → anime6B、"
+                           "real → x4plus、mix/空 → anime6B)",
+                           "Real-ESRGAN model name for upscaling (default: style=anime → anime6B, "
+                           "real → x4plus, mix/empty → anime6B)"))
     ap.add_argument("--adetailer", action=argparse.BooleanOptionalAction, default=None,
-                    help="ADetailer (顔/手 YOLO inpainting)。既定: gear high で ON / low で OFF")
+                    help=L("ADetailer (顔/手 YOLO inpainting)。既定: gear high で ON / low で OFF",
+                           "ADetailer (face/hand YOLO inpainting). Default: ON for gear high / OFF for low"))
     ap.add_argument("--adetailer-face-model", type=str, default="bbox/face_yolov8n.pt",
-                    help="ADetailer 顔検出 model (既定 face_yolov8n)")
+                    help=L("ADetailer 顔検出 model (既定 face_yolov8n)", "ADetailer face detection model (default face_yolov8n)"))
     ap.add_argument("--adetailer-hand-model", type=str, default="bbox/hand_yolov8n.pt",
-                    help="ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8n)")
+                    help=L("ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8n)",
+                           "ADetailer hand detection model (empty string to disable hand, default hand_yolov8n)"))
     ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8n-seg.pt",
-                    help="ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8n-seg)。"
-                         "足/脚の奇形補正に使用、denoise を低めで構造維持")
+                    help=L("ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8n-seg)。"
+                           "足/脚の奇形補正に使用、denoise を低めで構造維持",
+                           "ADetailer full-body detection model (empty string to disable, default person_yolov8n-seg). "
+                           "Used to correct leg/foot artifacts; lower denoise to preserve structure"))
     ap.add_argument("--adetailer-breast-model", type=str, default="bbox/female-breast-v4.0-fantasy.pt",
-                    help="ADetailer 胸部検出 model (空文字で OFF、既定 female-breast-v4.0-fantasy)。検出時のみ inpaint")
+                    help=L("ADetailer 胸部検出 model (空文字で OFF、既定 female-breast-v4.0-fantasy)。検出時のみ inpaint",
+                           "ADetailer breast detection model (empty string to disable, default female-breast-v4.0-fantasy). Inpaints only when detected"))
     ap.add_argument("--adetailer-nipples-model", type=str, default="bbox/nipples_yolov8s.pt",
-                    help="ADetailer 乳首検出 model (空文字で OFF、既定 nipples_yolov8s)")
+                    help=L("ADetailer 乳首検出 model (空文字で OFF、既定 nipples_yolov8s)",
+                           "ADetailer nipples detection model (empty string to disable, default nipples_yolov8s)"))
     ap.add_argument("--adetailer-pussy-model", type=str, default="bbox/pussy.pt",
-                    help="ADetailer 陰部検出 model (空文字で OFF、既定 pussy)")
+                    help=L("ADetailer 陰部検出 model (空文字で OFF、既定 pussy)",
+                           "ADetailer genitalia detection model (empty string to disable, default pussy)"))
     ap.add_argument("--adetailer-denoise", type=float, default=0.5,
-                    help="ADetailer (face/hand) inpaint strength (既定 0.5)")
+                    help=L("ADetailer (face/hand) inpaint strength (既定 0.5)",
+                           "ADetailer (face/hand) inpaint strength (default 0.5)"))
     ap.add_argument("--adetailer-person-denoise", type=float, default=0.3,
-                    help="ADetailer person inpaint strength (既定 0.3、低めで構造維持)")
+                    help=L("ADetailer person inpaint strength (既定 0.3、低めで構造維持)",
+                           "ADetailer person inpaint strength (default 0.3, lower to preserve structure)"))
     ap.add_argument("--adetailer-part-denoise", type=float, default=0.4,
-                    help="NSFW 部位 ADetailer (breast/nipples/pussy) の denoise (既定 0.4、構造維持しつつディテール付与)")
+                    help=L("NSFW 部位 ADetailer (breast/nipples/pussy) の denoise (既定 0.4、構造維持しつつディテール付与)",
+                           "NSFW body-part ADetailer (breast/nipples/pussy) denoise (default 0.4, preserves structure while adding detail)"))
     ap.add_argument("--adetailer-steps", type=int, default=30,
-                    help="ADetailer 各 detected region のステップ数 (既定 30)")
+                    help=L("ADetailer 各 detected region のステップ数 (既定 30)",
+                           "ADetailer inference steps per detected region (default 30)"))
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
-                    help="Embedding dir (sdxl=4_4 / sd15=3_2) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)")
+                    help=L("Embedding dir (sdxl=4_4 / sd15=3_2) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)",
+                           "auto-inject negative quality embeddings (`*-neg` etc.) from embedding dir (sdxl=4_4 / sd15=3_2) into negative (default ON)"))
     ap.add_argument("--quality-prefix", type=str, default="",
-                    help="positive の先頭に常時前置する quality タグ列 (例 'score_9, score_8_up, score_7_up')。"
-                         "checkpoint の系統に合わせて指定。--pony 指定時は Pony 標準値が自動で入る")
+                    help=L("positive の先頭に常時前置する quality タグ列 (例 'score_9, score_8_up, score_7_up')。"
+                           "checkpoint の系統に合わせて指定。--pony 指定時は Pony 標準値が自動で入る",
+                           "quality tag string always prepended to positive (e.g. 'score_9, score_8_up, score_7_up'). "
+                           "Match to checkpoint lineage. When --pony is set, Pony defaults are inserted automatically"))
     ap.add_argument("--pony", action="store_true",
-                    help="Pony 系 checkpoint 用。--quality-prefix 未指定なら "
-                         "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' を前置")
+                    help=L("Pony 系 checkpoint 用。--quality-prefix 未指定なら "
+                           "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' を前置",
+                           "for Pony lineage checkpoints. Prepends "
+                           "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' if --quality-prefix is not set"))
     ap.add_argument("--cooldown", type=float, default=None,
-                    help="1 枚生成後の待機秒。既定: GPU 温度 - 50 秒 (温度取れなければ 1.0 秒、--cooldown 0 で OFF)")
+                    help=L("1 枚生成後の待機秒。既定: GPU 温度 - 50 秒 (温度取れなければ 1.0 秒、--cooldown 0 で OFF)",
+                           "cooldown interval in seconds after each image. Default: GPU temp - 50s (1.0s if temp unavailable, --cooldown 0 to disable)"))
+    ap.add_argument("--dump-workflow", action="store_true",
+                    help=L("投入する API workflow JSON を workflow_dump/ にも保存 (生成は通常通り実行)。"
+                           "出力 JSON を ComfyUI WebUI の canvas にドラッグすればグラフを可視化できる",
+                           "also save the submitted API workflow JSON to workflow_dump/ (generation runs normally). "
+                           "Drag the output JSON onto the ComfyUI WebUI canvas to visualize the graph"))
+    ap.add_argument("--dump-only", action="store_true",
+                    help=L("workflow JSON を吐くだけで ComfyUI への投入はしない (GPU を使わずグラフ確認)。"
+                           "1 枚分の単一パス workflow を吐いて即終了 (chain/refine は無効化)",
+                           "dump workflow JSON only without submitting to ComfyUI (graph inspection without GPU). "
+                           "Dumps a single-pass workflow for one image then exits immediately (chain/refine disabled)"))
     args = ap.parse_args()
 
     # --version は checkpoint 抽選プールの絞り込みのみ (auto=両レーン統合)。
@@ -1554,11 +1648,14 @@ def main() -> None:
     # SD15 下書き段には前置しない (Pony は SDXL のみ)。
     explicit_prefix = args.quality_prefix.strip()
     if explicit_prefix:
-        print(f"[quality prefix] 明示 (全 checkpoint): {explicit_prefix}")
+        print(L(f"[quality prefix] 明示 (全 checkpoint): {explicit_prefix}",
+                f"[quality prefix] explicit (all checkpoints): {explicit_prefix}"))
     elif args.pony:
-        print(f"[quality prefix] --pony: 全 checkpoint に Pony score を前置")
+        print(L(f"[quality prefix] --pony: 全 checkpoint に Pony score を前置",
+                f"[quality prefix] --pony: prepending Pony score to all checkpoints"))
     else:
-        print(f"[quality prefix] family=pony の checkpoint にのみ Pony score を自動前置")
+        print(L(f"[quality prefix] family=pony の checkpoint にのみ Pony score を自動前置",
+                f"[quality prefix] auto-prepending Pony score only for family=pony checkpoints"))
 
     steps = {"low": 30, "high": 50}[args.gear]
 
@@ -1584,8 +1681,10 @@ def main() -> None:
           f"gear: {args.gear} (steps={steps})  arch: {args.arch}  "
           f"upscale: {args.upscale}  adetailer: {args.adetailer}")
     if args.gear == "high":
-        print(f"  gear high: SDXL 当選→1パス清書 / SD15 当選→SD15下書き→SDXL清書 "
-              f"(img2img denoise {args.chain_denoise})")
+        print(L(f"  gear high: SDXL 当選→1パス清書 / SD15 当選→SD15下書き→SDXL清書 "
+                f"(img2img denoise {args.chain_denoise})",
+                f"  gear high: SDXL drawn→single-pass clean / SD15 drawn→SD15 draft→SDXL clean "
+                f"(img2img denoise {args.chain_denoise})"))
 
     print(f"\n--- tensors triage ---")
     counts = check_tensors()
@@ -1594,15 +1693,17 @@ def main() -> None:
           f"SD15: ckpt={counts['sd15_checkpoint']} LoRA={counts['sd15_lora']} "
           f"embed={counts['sd15_embedding']}   error={counts['error']}")
     if not _gather_checkpoints(pool_dirs):
-        raise SystemExit(f"\n抽選プール ({', '.join(d.name for d in pool_dirs)}) に "
-                         f"checkpoint がありません。先に 2_0_tensors に投入を")
+        raise SystemExit(L(f"\n抽選プール ({', '.join(d.name for d in pool_dirs)}) に "
+                           f"checkpoint がありません。先に 2_0_tensors に投入を",
+                           f"\nno checkpoints in draw pool ({', '.join(d.name for d in pool_dirs)}). "
+                           f"Place tensors in 2_0_tensors first"))
 
-    print(f"\n--- ComfyUI 接続確認 / device 整合 ---")
+    print(L(f"\n--- ComfyUI 接続確認 / device 整合 ---", f"\n--- ComfyUI connection check / device match ---"))
     yaml_changed = write_extra_model_paths()  # model dir を ComfyUI に登録 (dir 定数から自動生成)
     ensure_comfyui_arch(args.arch, force_restart=yaml_changed)
     cur_device = get_comfyui_device()
     if cur_device is None:
-        raise SystemExit(f"ComfyUI に接続できません ({COMFY_BASE})")
+        raise SystemExit(L(f"ComfyUI に接続できません ({COMFY_BASE})", f"cannot connect to ComfyUI ({COMFY_BASE})"))
     print(f"  OK: {COMFY_BASE} (device={cur_device})")
 
     client_id = uuid.uuid4().hex
@@ -1631,7 +1732,8 @@ def main() -> None:
     }
     for ln in ("sdxl", "sd15"):
         a = lane_assets[ln]
-        print(f"  [{ln}] LoRA 候補: {len(a['loras'])} 件 / neg embed: {len(a['neg'])} 件")
+        print(L(f"  [{ln}] LoRA 候補: {len(a['loras'])} 件 / neg embed: {len(a['neg'])} 件",
+                f"  [{ln}] LoRA candidates: {len(a['loras'])} / neg embed: {len(a['neg'])}"))
 
     # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
     face_model = person_model = hand_model = None
@@ -1644,7 +1746,8 @@ def main() -> None:
         nipples_model = ensure_adetailer_model(args.adetailer_nipples_model or None)
         pussy_model   = ensure_adetailer_model(args.adetailer_pussy_model or None)
         if not face_model:
-            print("  [adetailer][warn] face model が無く DL も不可 → ADetailer 全体を OFF", flush=True)
+            print(L("  [adetailer][warn] face model が無く DL も不可 → ADetailer 全体を OFF",
+                    "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
             args.adetailer = False
 
     # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
@@ -1658,7 +1761,8 @@ def main() -> None:
     stop = {"flag": False}
     def handler(_s, _f):
         stop["flag"] = True
-        print("\n[Ctrl+C] 中断要求 (現在の生成完了後に終了)", flush=True)
+        print(L("\n[Ctrl+C] 中断要求 (現在の生成完了後に終了)",
+                "\n[Ctrl+C] stop requested (will exit after current generation finishes)"), flush=True)
     signal.signal(signal.SIGINT, handler)
 
     total = 0
@@ -1670,11 +1774,12 @@ def main() -> None:
             src_png: Optional[Path] = None
             if args.prompt == "refine":
                 if not args.png:
-                    raise SystemExit("--png <PNG> が必要")
+                    raise SystemExit(L("--png <PNG> が必要", "--png <PNG> is required"))
                 src_png = resolve_png_path(args.png)
             elif args.prompt in ("png", "original"):
                 if not args.png_sentence:
-                    raise SystemExit(f"--prompt {args.prompt} には --png-sentence <PNG> が必要")
+                    raise SystemExit(L(f"--prompt {args.prompt} には --png-sentence <PNG> が必要",
+                                       f"--prompt {args.prompt} requires --png-sentence <PNG>"))
                 src_png = resolve_png_path(args.png_sentence)
 
             positive, negative, lora_keywords, extras = get_prompt_for_iteration(
@@ -1696,7 +1801,9 @@ def main() -> None:
             print(f"\n=== source {total+1} ===")
 
             # ---- 2 段チェーン: gear high + SD15 当選 → SD15 下書き → SDXL 清書 ----
-            chain = (args.gear == "high" and ckpt_lane == "sd15" and not is_refine)
+            # --dump-only は下書き生成 (GPU) を避けたいので chain を切り単一パス build にする
+            chain = (args.gear == "high" and ckpt_lane == "sd15"
+                     and not is_refine and not args.dump_only)
             init_image_name: Optional[str] = None
             draft_checkpoint_meta: Optional[str] = None      # 2段時の SD15 下書き checkpoint (メタ記録用)
             draft_loras_meta: list[tuple[str, float]] = []   # 2段時の SD15 下書き LoRA (メタ記録用)
@@ -1704,8 +1811,10 @@ def main() -> None:
                 # 画質アップ: PNG をそのまま init に SDXL img2img (チェーンの清書段だけを単体実行)
                 init_image_name = upload_image_to_comfyui(src_png)
                 pipeline_label = f"refine (src: {src_png.stem}, denoise {args.refine_denoise})"
-                print(f"  [refine] {src_png.name} を SDXL img2img で画質アップ "
-                      f"(denoise {args.refine_denoise})", flush=True)
+                print(L(f"  [refine] {src_png.name} を SDXL img2img で画質アップ "
+                        f"(denoise {args.refine_denoise})",
+                        f"  [refine] quality-up {src_png.name} via SDXL img2img "
+                        f"(denoise {args.refine_denoise})"), flush=True)
             elif chain:
                 draft_ckpt = checkpoint_path
                 sd15a = lane_assets["sd15"]
@@ -1723,7 +1832,8 @@ def main() -> None:
                 d_pos = augment_positive_with_lora_keywords(positive, lora_keywords)
                 d_neg = augment_negative_with_embeddings(negative, gate_neg_embeddings(sd15a["neg"], False))
                 lk = f"  LoRA x{len(d_loras)}" if d_loras else ""
-                print(f"  [chain] SD15 下書き生成中: {draft_ckpt.name} ({d_w}x{d_h}){lk}", flush=True)
+                print(L(f"  [chain] SD15 下書き生成中: {draft_ckpt.name} ({d_w}x{d_h}){lk}",
+                        f"  [chain] generating SD15 draft: {draft_ckpt.name} ({d_w}x{d_h}){lk}"), flush=True)
                 draft_wf = build_workflow_txt2img(
                     checkpoint=draft_ckpt.name, positive=d_pos, negative=d_neg,
                     seed=seed, steps=d_steps, cfg=args.cfg_scale, width=d_w, height=d_h,
@@ -1731,24 +1841,29 @@ def main() -> None:
                     loras=[(p.name, s) for p, s in d_loras],
                     filename_prefix="playground_draft",
                 )
+                if args.dump_workflow:
+                    _dump_workflow(draft_wf, "draft_sd15")
                 d_bytes, _d_info, _ = _submit_and_fetch(draft_wf, client_id)
                 if d_bytes is None:
-                    print("  [warn] 下書き生成に失敗、この枚をスキップ", flush=True)
+                    print(L("  [warn] 下書き生成に失敗、この枚をスキップ",
+                            "  [warn] draft generation failed, skipping this image"), flush=True)
                     continue
                 if args.save_draft:
                     SD15_ROUGH_DIR.mkdir(exist_ok=True)
                     dts = datetime.now().strftime("%Y%m%d%H%M%S")
                     (SD15_ROUGH_DIR / f"{dts}_draft.png").write_bytes(d_bytes)
-                    print(f"  下書き保存: 3_9_SD15_rough/{dts}_draft.png")
+                    print(L(f"  下書き保存: 3_9_SD15_rough/{dts}_draft.png",
+                            f"  draft saved: 3_9_SD15_rough/{dts}_draft.png"))
                 init_image_name = upload_bytes_to_comfyui(d_bytes, f"draft_{seed}.png")
                 # 清書は SDXL を別途抽選 → 以降は SDXL stage として通常 body を実行
                 checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, args.checkpoint,
                                                   pool_dirs=[SDXL_CHECKPOINT_DIR])
                 ckpt_lane = "sdxl"
-                pipeline_label = (f"SD15→SDXL 2段 (draft: {draft_ckpt.stem} / "
+                # pipeline_label は PNG メタにも書かれる。メタは英語に統一するため英語固定 (L で切替えない)。
+                pipeline_label = (f"SD15→SDXL 2-stage (draft: {draft_ckpt.stem} / "
                                   f"clean: {checkpoint_path.stem}, denoise {args.chain_denoise})")
             else:
-                pipeline_label = f"{ckpt_lane.upper()} 1パス"
+                pipeline_label = f"{ckpt_lane.upper()} single-pass"
 
             # ---- 清書 / 単一パス stage (active lane = ckpt_lane の資産を使う) ----
             active = lane_assets[ckpt_lane]
@@ -1775,7 +1890,8 @@ def main() -> None:
                         if cand2.exists():
                             cand = cand2
                         else:
-                            print(f"  [warn] PNG メタの LoRA が見つからない: {name}、スキップ", flush=True)
+                            print(L(f"  [warn] PNG メタの LoRA が見つからない: {name}、スキップ",
+                            f"  [warn] LoRA from PNG metadata not found: {name}, skipping"), flush=True)
                             continue
                     picked_loras.append((cand, float(strength)))
             elif args.gear == "high" and active["loras"] and args.lora_stack_max > 0:
@@ -1808,7 +1924,8 @@ def main() -> None:
                         try:
                             controlnet_upload_name = upload_image_to_comfyui(src_png)
                         except Exception as e:
-                            print(f"  [warn] ControlNet 用画像 upload 失敗 ({e})、CN OFF", flush=True)
+                            print(L(f"  [warn] ControlNet 用画像 upload 失敗 ({e})、CN OFF",
+                            f"  [warn] ControlNet source image upload failed ({e}), CN OFF"), flush=True)
                             picked_controlnet = None
 
             # OpenPose 有効時は pose 系 LoRA を除外 (姿勢の取り合い回避、SDXL_LoRA.toml subject=pose)
@@ -1818,11 +1935,12 @@ def main() -> None:
                 if dropped_pose:
                     picked_loras = [(p, s) for p, s in picked_loras
                                     if sdxl_lora_subjects.get(p.stem) != "pose"]
-                    print(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped_pose)}")
+                    print(L(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped_pose)}",
+                            f"  [pose-gate] OpenPose active → dropping pose LoRAs: {', '.join(dropped_pose)}"))
 
             print(f"  path      : {pipeline_label}")
             print(f"  checkpoint: {checkpoint_path.name} ({ckpt_lane.upper()})"
-                  f"{' (未計測)' if checkpoint_path.stem not in checkpoint_data else ''}")
+                  f"{L(' (未計測)', ' (unscored)') if checkpoint_path.stem not in checkpoint_data else ''}")
             print(f"  positive  : {positive[:120]}{'...' if len(positive) > 120 else ''}")
             print(f"  negative  : {negative[:80]}{'...' if len(negative) > 80 else ''}")
             print(f"  lora_kw   : {', '.join(lora_keywords) if lora_keywords else '(none)'}")
@@ -1834,7 +1952,8 @@ def main() -> None:
                 print(f"  ControlNet: {picked_controlnet.name} "
                       f"(mode={controlnet_mode}, strength={effective_cn_strength:.2f}){tag}")
             if many:
-                print(f"  size      : {gen_width}x{gen_height} (many 横長)")
+                print(L(f"  size      : {gen_width}x{gen_height} (many 横長)",
+                        f"  size      : {gen_width}x{gen_height} (many landscape)"))
             print(f"  seed/steps: {seed} / {use_steps}"
                   f"{f' (= {steps} + inference {inference_bonus:+})' if inference_bonus else ''}"
                   f"{f' / img2img denoise {args.chain_denoise}' if chain else ''}")
@@ -1858,7 +1977,7 @@ def main() -> None:
             pos_for_stage = positive
             if eff_prefix and not positive.lower().startswith(eff_prefix.split(",")[0].strip().lower()):
                 pos_for_stage = f"{eff_prefix}, {positive}" if positive else eff_prefix
-                src = "明示" if explicit_prefix else ("--pony" if args.pony else "family=pony")
+                src = L("明示", "explicit") if explicit_prefix else ("--pony" if args.pony else "family=pony")
                 print(f"  [score] {src} → {eff_prefix.split(',')[0].strip()}…")
 
             # LoRA キーワードを (0.8/N) 重みで positive に append (README L193 仕様)
@@ -1871,8 +1990,9 @@ def main() -> None:
             gated_neg = gate_neg_embeddings(active["neg"], ckpt_is_pony)
             if len(gated_neg) != len(active["neg"]):
                 dropped = [e for e in active["neg"] if e not in gated_neg]
-                why = "Pony embed 上限3超過" if ckpt_is_pony else "非Pony → Pony embed"
-                print(f"  [neg-gate] {why} 除外: {', '.join(dropped)}")
+                why = L("Pony embed 上限3超過", "Pony embed cap exceeded (3)") if ckpt_is_pony else L("非Pony → Pony embed", "non-Pony → Pony embed")
+                print(L(f"  [neg-gate] {why} 除外: {', '.join(dropped)}",
+                        f"  [neg-gate] {why} excluded: {', '.join(dropped)}"))
             negative_augmented = augment_negative_with_embeddings(negative, gated_neg)
 
             workflow_loras = [(p.name, s) for p, s in picked_loras]
@@ -1917,6 +2037,16 @@ def main() -> None:
             if upscale_model_name:
                 print(f"  upscale: {upscale_model_name}")
 
+            if args.dump_workflow or args.dump_only:
+                kind = "refine" if is_refine else ("chain_clean" if chain else f"{ckpt_lane}_single")
+                _dump_workflow(workflow, kind)
+            if args.dump_only:
+                print(L("  [dump-only] ComfyUI への投入はスキップ。"
+                        "上記 JSON を WebUI canvas にドロップしてグラフ確認",
+                        "  [dump-only] skipping ComfyUI submission. "
+                        "Drop the JSON above onto the WebUI canvas to inspect the graph"), flush=True)
+                break
+
             prompt_id = submit_prompt(workflow, client_id)
             print(f"  ComfyUI prompt_id: {prompt_id}")
 
@@ -1927,7 +2057,8 @@ def main() -> None:
             save_node = outputs.get("7", {})
             images = save_node.get("images", [])
             if not images:
-                print(f"  [warn] 出力画像が見つからない、スキップ")
+                print(L(f"  [warn] 出力画像が見つからない、スキップ",
+                        f"  [warn] output image not found, skipping"))
                 continue
             img_info = images[0]
             img_bytes = fetch_image(img_info["filename"],
@@ -1998,7 +2129,8 @@ def main() -> None:
                     )
                     print(f"      up → 5_2_upscaled/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
                 else:
-                    print(f"  [warn] アップスケール出力が見つからない")
+                    print(L(f"  [warn] アップスケール出力が見つからない",
+                            f"  [warn] upscaled output not found"))
 
             # gear high のみ checkpoint.toml の fast/slow を更新 / 新規追記
             # 直前にディスクから再読込してマージ → ユーザが外部エディタで編集中の他フィールドを潰さない
@@ -2014,20 +2146,21 @@ def main() -> None:
                     wait_s = max(0.0, float((temp or 51) - 50))
                 if wait_s > 0:
                     if args.cooldown is None and temp is not None:
-                        print(f"  cooldown: GPU {temp}°C → {wait_s:.0f}s 待機")
+                        print(L(f"  cooldown: GPU {temp}°C → {wait_s:.0f}s 待機",
+                                f"  cooldown: GPU {temp}°C → waiting {wait_s:.0f}s"))
                     time.sleep(wait_s)
 
         except Exception as e:
-            print(f"\n[エラー] {e}", flush=True)
+            print(L(f"\n[エラー] {e}", f"\n[error] {e}"), flush=True)
             if not stop["flag"]:
                 time.sleep(5.0)
 
-    print(f"\n総計: {total} 枚")
+    print(L(f"\n総計: {total} 枚", f"\ntotal: {total} image(s)"))
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n中断")
+        print(L("\n中断", "\ninterrupted"))
         sys.exit(0)

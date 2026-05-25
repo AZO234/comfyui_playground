@@ -30,6 +30,8 @@ from typing import Optional
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
+from i18n import L
+
 # Windows console 絵文字落ち防止
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -178,7 +180,7 @@ def show_info(png_path: Path) -> None:
     """PNG 内のメタ情報を全て表示する。"""
     chunks = read_text_chunks(png_path)
     if not chunks:
-        print("(text chunk なし)")
+        print(L("(text chunk なし)", "(no text chunks)"))
         return
 
     print(f"--- {png_path.name} ---")
@@ -198,7 +200,7 @@ def show_info(png_path: Path) -> None:
         # LoRA キーワード (playground 独自)
         lora_kw = parsed["params"].get("Lora keywords", "")
         if lora_kw:
-            print(f"\nLoRA キーワード: {lora_kw}")
+            print(L(f"\nLoRA キーワード: {lora_kw}", f"\nLoRA keywords: {lora_kw}"))
         print()
 
     # ComfyUI workflow / prompt chunk (JSON) も表示 (概要のみ)
@@ -228,7 +230,7 @@ def set_sentence(png_path: Path, new_positive: str) -> None:
     parsed["positive"] = new_positive
     chunks["parameters"] = serialize_a1111_parameters(parsed)
     write_text_chunks(png_path, chunks)
-    print(f"OK: 文章プロンプトを更新 ({png_path.name})")
+    print(L(f"OK: 文章プロンプトを更新 ({png_path.name})", f"OK: sentence prompt updated ({png_path.name})"))
 
 
 def set_lora_keywords(png_path: Path, keywords: str) -> None:
@@ -242,29 +244,33 @@ def set_lora_keywords(png_path: Path, keywords: str) -> None:
         parsed["params"].pop("Lora keywords", None)
     chunks["parameters"] = serialize_a1111_parameters(parsed)
     write_text_chunks(png_path, chunks)
-    print(f"OK: LoRA キーワードを {'更新' if keywords.strip() else '削除'} ({png_path.name})")
+    _action = L("更新", "updated") if keywords.strip() else L("削除", "cleared")
+    print(L(f"OK: LoRA キーワードを {_action} ({png_path.name})", f"OK: LoRA keywords {_action} ({png_path.name})"))
 
 
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="メタ入り PNG (A1111 互換) の文章プロンプト・LoRA キーワード操作")
-    ap.add_argument("png", type=str, help="対象 PNG ファイル")
+    ap = argparse.ArgumentParser(description=L(
+        "メタ入り PNG (A1111 互換) の文章プロンプト・LoRA キーワード操作",
+        "Inspect/edit sentence prompt and LoRA keywords in A1111-compatible PNG metadata"))
+    ap.add_argument("png", type=str, help=L("対象 PNG ファイル", "target PNG file"))
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--sentence", type=str, default=None,
-                       help="文章プロンプトを上書き")
+                       help=L("文章プロンプトを上書き", "replace the sentence (positive) prompt"))
     group.add_argument("--lora", type=str, default=None,
-                       help='LoRA キーワードを上書き (例: "school wear, jewel")。空文字でクリア')
+                       help=L('LoRA キーワードを上書き (例: "school wear, jewel")。空文字でクリア',
+                               'replace LoRA keywords (e.g. "school wear, jewel"); empty string to clear'))
     group.add_argument("--erase", action="store_true",
-                       help="全 text chunk を削除")
+                       help=L("全 text chunk を削除", "strip all text chunks"))
     args = ap.parse_args()
 
     png_path = Path(args.png)
     if not png_path.exists():
-        raise SystemExit(f"PNG が見つかりません: {png_path}")
+        raise SystemExit(L(f"PNG が見つかりません: {png_path}", f"PNG file not found: {png_path}"))
     if png_path.suffix.lower() != ".png":
-        raise SystemExit(f"PNG ファイルを指定してください: {png_path}")
+        raise SystemExit(L(f"PNG ファイルを指定してください: {png_path}", f"Please specify a PNG file: {png_path}"))
 
     if args.sentence is not None:
         set_sentence(png_path, args.sentence)
@@ -272,7 +278,7 @@ def main() -> None:
         set_lora_keywords(png_path, args.lora)
     elif args.erase:
         erase_text_chunks(png_path)
-        print(f"OK: 全 text chunk を削除 ({png_path.name})")
+        print(L(f"OK: 全 text chunk を削除 ({png_path.name})", f"OK: all text chunks stripped ({png_path.name})"))
     else:
         show_info(png_path)
 
@@ -281,5 +287,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n中断")
+        print(L("\n中断", "\nInterrupted"))
         sys.exit(0)

@@ -1,1 +1,0 @@
-manually-dropped bad checkpoints/tensors; never scanned or picked
