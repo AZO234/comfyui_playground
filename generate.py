@@ -467,6 +467,10 @@ def build_workflow_txt2img(
     adetailer_denoise: float = 0.5,
     adetailer_person_denoise: float = 0.3,
     adetailer_steps: int = 30,
+    hires_fix: bool = False,
+    hires_scale: float = 1.5,
+    hires_denoise: float = 0.5,
+    hires_steps: int = 20,
 ) -> dict:
     """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
 
@@ -476,7 +480,16 @@ def build_workflow_txt2img(
     init_image (ComfyUI 上のアップロード名) を渡すと img2img になる:
     その画像を width×height にスケール → VAEEncode → denoise (既定 1.0、img2img では <1) で再描画。
     未指定なら EmptyLatentImage の txt2img (denoise は内部で 1.0 固定)。
+
+    Hires Fix (hires_fix=True): width/height を **base 解像度** (= 1段目 sampling 解像度)
+    として扱い、LatentUpscaleBy(scale) → 2 段目 KSampler(hires_denoise) で refine →
+    最終 latent は width×scale × height×scale で VAEDecode。memory 「Hires Fix 既定 ON
+    (512→768 二段)」を ComfyUI 版に移植した実装で、引数の width/height は **必ず base 側**
+    (SD15 なら 512〜768、SDXL なら 1024 等のネイティブ解像度) を渡す。Hires Fix off のときは
+    width/height がそのまま最終解像度。txt2img / img2img どちらでも動く。
     """
+    # Hires Fix は width/height を base として扱うので、追加の縮小は不要
+    base_w, base_h = width, height
     workflow: dict = {
         "1": {
             "class_type": "CheckpointLoaderSimple",
@@ -517,13 +530,14 @@ def build_workflow_txt2img(
     # SD15 下書き → SDXL 清書チェーンの「清書」段がこの img2img 経路を使う。
     if init_image:
         # node ID は 40-42 を使う (ADetailer 部位ループが 26-31 を使うため衝突回避)
+        # init_image は base 解像度にスケール (Hires Fix 段で 1.5× にアップ)
         workflow["40"] = {
             "class_type": "LoadImage",
             "inputs": {"image": init_image},
         }
         workflow["41"] = {
             "class_type": "ImageScale",
-            "inputs": {"image": ["40", 0], "width": width, "height": height,
+            "inputs": {"image": ["40", 0], "width": base_w, "height": base_h,
                        "upscale_method": "lanczos", "crop": "disabled"},
         }
         workflow["42"] = {
@@ -535,7 +549,7 @@ def build_workflow_txt2img(
     else:
         workflow["4"] = {
             "class_type": "EmptyLatentImage",
-            "inputs": {"width": width, "height": height, "batch_size": 1},
+            "inputs": {"width": base_w, "height": base_h, "batch_size": 1},
         }
         latent_ref = ["4", 0]
         ksampler_denoise = 1.0
@@ -600,8 +614,41 @@ def build_workflow_txt2img(
         "class_type": "VAEDecode",
         "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
     }
+    # Hires Fix: 1段目 latent (node 5) を 1.5× upscale → 2段目 KSampler で refine → VAEDecode。
+    # 最終 image ref を Hires Fix 後の VAEDecode (node 32) に切り替える。
+    # 旧 sd_playground の「512→768 二段」を ComfyUI 版に移植 (memory feedback_hires_fix_confirmed)。
+    if hires_fix:
+        workflow["30"] = {
+            "class_type": "LatentUpscaleBy",
+            "inputs": {
+                "samples": ["5", 0],
+                "upscale_method": "nearest-exact",
+                "scale_by": float(hires_scale),
+            },
+        }
+        workflow["31"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": (seed + 7) & 0xFFFFFFFF,   # 2 段目は別ノイズで refine
+                "steps": int(hires_steps),
+                "cfg": float(cfg),
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
+                "denoise": float(hires_denoise),
+                "model": model_ref,
+                "positive": ksampler_positive_ref,
+                "negative": ksampler_negative_ref,
+                "latent_image": ["30", 0],
+            },
+        }
+        workflow["32"] = {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["31", 0], "vae": ["1", 2]},
+        }
+        final_image_ref = ["32", 0]
+    else:
+        final_image_ref = ["6", 0]
     # ADetailer chain (FaceDetailer for face / optional hand / optional person)
-    final_image_ref = ["6", 0]
     if adetailer:
         def _facedetailer_inputs(image_ref, bbox_ref, det_seed,
                                   denoise=adetailer_denoise,
@@ -1560,6 +1607,20 @@ def main() -> None:
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help=L("ADetailer 各 detected region のステップ数 (既定 30)",
                            "ADetailer inference steps per detected region (default 30)"))
+    ap.add_argument("--hires-fix", action=argparse.BooleanOptionalAction, default=None,
+                    help=L("Hires Fix (低解像度→1.5×二段)。draft / 清書段の両方に効く。"
+                           "既定: gear high で ON / low で OFF",
+                           "Hires Fix (low-res then 1.5× refine pass). Applies to both draft and clean stages. "
+                           "Default: ON for gear high / OFF for low"))
+    ap.add_argument("--hires-scale", type=float, default=1.5,
+                    help=L("Hires Fix のスケール係数 (既定 1.5、512→768 の比率)",
+                           "Hires Fix scale factor (default 1.5, matches 512→768)"))
+    ap.add_argument("--hires-denoise", type=float, default=0.5,
+                    help=L("Hires Fix 2 段目 denoise (既定 0.5)",
+                           "Hires Fix 2nd-pass denoise (default 0.5)"))
+    ap.add_argument("--hires-steps", type=int, default=20,
+                    help=L("Hires Fix 2 段目 step 数 (既定 20)",
+                           "Hires Fix 2nd-pass steps (default 20)"))
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
                     help=L("Embedding dir (sdxl=4_4 / sd15=3_2) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)",
                            "auto-inject negative quality embeddings (`*-neg` etc.) from embedding dir (sdxl=4_4 / sd15=3_2) into negative (default ON)"))
@@ -1633,17 +1694,20 @@ def main() -> None:
     elif args.sentence and args.prompt == "auto":
         args.prompt = "sentence"
 
-    # アップスケール / ADetailer 既定 (gear に紐づき、明示で上書き)
+    # アップスケール / ADetailer / Hires Fix 既定 (gear に紐づき、明示で上書き)
     if args.upscale is None:
         args.upscale = (args.gear == "high")
     if args.adetailer is None:
         args.adetailer = (args.gear == "high")
+    if args.hires_fix is None:
+        args.hires_fix = (args.gear == "high")
 
     pool_label = {"auto": "SD15+SDXL", "sd15": "SD15", "sdxl": "SDXL"}[args.version]
     print(f"=== generate.py ===")
     print(f"checkpoint pool: {pool_label}  prompt mode: {args.prompt}  "
           f"gear: {args.gear} (steps={steps})  arch: {args.arch}  "
-          f"upscale: {args.upscale}  adetailer: {args.adetailer}")
+          f"upscale: {args.upscale}  adetailer: {args.adetailer}  "
+          f"hires_fix: {args.hires_fix}")
     if args.gear == "high":
         print(L(f"  gear high: SDXL 当選→1パス清書 / SD15 当選→SD15下書き→SDXL清書 "
                 f"(img2img denoise {args.chain_denoise})",
@@ -1800,6 +1864,8 @@ def main() -> None:
                     sampler_name=args.sampler, scheduler=args.scheduler,
                     loras=[(p.name, s) for p, s in d_loras],
                     filename_prefix="playground_draft",
+                    hires_fix=args.hires_fix, hires_scale=args.hires_scale,
+                    hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
                 )
                 if args.dump_workflow:
                     _dump_workflow(draft_wf, "draft_sd15")
@@ -1989,6 +2055,8 @@ def main() -> None:
                 adetailer_denoise=args.adetailer_denoise,
                 adetailer_person_denoise=args.adetailer_person_denoise,
                 adetailer_steps=args.adetailer_steps,
+                hires_fix=args.hires_fix, hires_scale=args.hires_scale,
+                hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
             )
             if args.adetailer:
                 parts = [f"face={face_model}"]

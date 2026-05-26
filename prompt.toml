@@ -37,7 +37,7 @@
 # 1 つを均等ランダム抽選
 who = [
     # plane
-    ["**1-2 ladies**", 100, false, false, false, true, ""],
+    ["**1girl, 2girls**", 20, false, false, false, true, ""],
 ]
 
 # 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
@@ -58,7 +58,10 @@ wearing = [
 # - 採用された各 item は "with {item}" として個別句に展開される
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
-    ["nothing", 100, ""],
+    ["nothing", 50, ""],
+    ["necklace", 5, "jewel"],
+    ["ear piace", 5, "jewel"],
+    ["jewely", 5, "jewel"],
 ]
 
 # 動作: [motion, weight] または [motion, weight, lora_keywords]
@@ -77,12 +80,15 @@ at = [
     ["beach", 5, ""],
     ["on cauch", 10, ""],
     ["rooms bed", 10, ""],
+    ["hotels bed", 10, ""],
     ["bathroom", 5, ""],
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式
 lighting = [
-    "bright lighting",
+    "day lighting",
+    "white lighting",
+    "color lighting",
 ]
 
 # 必ず prompt 末尾に付加
