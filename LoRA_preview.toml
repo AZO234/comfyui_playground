@@ -1,0 +1,16 @@
+[templates]
+ware = "1lady, solo, full body, standing, looking at viewer, simple background"
+doing1 = "1lady, solo, full body, simple background"
+doing2 = "2ladies, full body, interaction, simple background"
+doing3 = "3ladies, full body, interaction, simple background"
+doingmob = "6+ladies, full body, interaction, simple background"
+object = "no humans, simple background"
+part = "1lady, solo, upper body, close-up, simple background"
+view = "1lady, solo, full body, simple background"
+place = "1lady, solo, full body, scenery"
+artstyle = "1lady, solo, upper body, looking at viewer, detailed, simple background"
+unknown = "1lady, solo, upper body, simple background"
+
+[prompts]
+
+[categories]
