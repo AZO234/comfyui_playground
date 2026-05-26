@@ -65,7 +65,8 @@ DEFAULT_POSITIVE = "1lady, solo, full body, standing, looking at viewer, simple 
 CATEGORIES_FILE = ROOT / "LoRA_preview.toml"
 
 # プレビュー用カテゴリ → positive スキャフォールド。後ろに {hint}, {trigger} が足される。
-#   ware=着衣 / doing{1,2,3,mob}=行為(人数別) / object=物体 / part=モデル部位 / view=視点 / unknown=その他
+#   ware=着衣 / doing{1,2,3,mob}=行為(人数別) / object=物体 / part=モデル部位 / view=視点 /
+#   place=場所 / artstyle=作風 / unknown=その他
 DEFAULT_TEMPLATES = {
     "ware":     DEFAULT_POSITIVE,
     "doing1":   "1lady, solo, full body, simple background",              # 1人 (自慰等)
@@ -75,6 +76,8 @@ DEFAULT_TEMPLATES = {
     "object":   "no humans, simple background",
     "part":     "1lady, solo, upper body, close-up, simple background",   # 部位を近接で見せる
     "view":     "1lady, solo, full body, simple background",              # 視点は hint/trigger 由来
+    "place":    "1lady, solo, full body, scenery",                        # 場所/環境を見せる (simple bg は外す)
+    "artstyle": "1lady, solo, upper body, looking at viewer, detailed, simple background",  # 画風を細部で見せる
     "unknown":  "1lady, solo, upper body, simple background",
 }
 # 行為系の自動推定トークン (--init-categories --guess 用)。

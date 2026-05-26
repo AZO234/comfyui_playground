@@ -271,7 +271,7 @@ _KEY_META = [
 PREVIEW_TOML = Path(__file__).resolve().parent / "LoRA_preview.toml"
 MAKE_PREVIEWS_PY = Path(__file__).resolve().parent / "make_previews.py"
 DEFAULT_CATEGORIES = ["ware", "doing1", "doing2", "doing3", "doingmob",
-                      "object", "part", "view", "unknown"]
+                      "object", "part", "view", "place", "artstyle", "unknown"]
 # カテゴリ別の既定 steps。part は部位が崩れ「クリーチャー」化しやすいので多めにする。
 DEFAULT_STEPS = 24
 CATEGORY_STEPS = {"part": 40}
