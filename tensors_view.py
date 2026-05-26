@@ -56,6 +56,53 @@ _DTYPE_BITS = {
 }
 _EMB_DIMS = {768, 1024, 1280, 2048}
 
+# checkpoint.toml (family タグ持ち) の場所 + lazy cache
+CHECKPOINT_TOML = Path(__file__).resolve().parent / "checkpoint.toml"
+_FAMILIES_CACHE: Optional[dict] = None
+
+
+def _is_pony_name(stem: str) -> bool:
+    """ファイル名から Pony 系かを推定。generate.py の同名関数と同一規則。"""
+    s = stem.lower()
+    return ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s)
+
+
+def _load_families() -> dict:
+    """checkpoint.toml から `{stem: family}` を返す。未設定は空文字。失敗時は空 dict。"""
+    global _FAMILIES_CACHE
+    if _FAMILIES_CACHE is not None:
+        return _FAMILIES_CACHE
+    import tomllib
+    out: dict = {}
+    if CHECKPOINT_TOML.exists():
+        try:
+            data = tomllib.loads(CHECKPOINT_TOML.read_text(encoding="utf-8"))
+            for stem, entry in data.items():
+                if isinstance(entry, dict):
+                    fam = str(entry.get("family") or "").strip().lower()
+                    out[stem] = fam
+        except Exception:
+            pass
+    _FAMILIES_CACHE = out
+    return out
+
+
+def family_for(stem: str, kind: str) -> str:
+    """Entry の family を決める。
+    - checkpoint (base/inpainting): checkpoint.toml の family 優先、無ければファイル名から pony 推定。
+    - lora: ファイル名から pony 推定 (LoRA には family タグ無し)。
+    - その他 (embedding/controlnet/broken): 空文字。
+    """
+    if kind in ("base", "inpainting"):
+        fams = _load_families()
+        fam = (fams.get(stem) or "").strip().lower()
+        if fam:
+            return fam
+        return "pony" if _is_pony_name(stem) else ""
+    if kind == "lora":
+        return "pony" if _is_pony_name(stem) else ""
+    return ""
+
 
 # --------------------------------------------------------------------------- #
 # safetensors ヘッダ読み取り (torch / safetensors 不要)
@@ -213,6 +260,7 @@ class Entry:
     triggers: str
     meta: dict
     preview_path: Optional[Path] = None   # <name>.preview.png サイドカー (あれば)
+    family: str = ""                      # checkpoint.toml or filename 由来 (pony/real/anime/...)
 
 
 def load_entry(path: Path) -> Entry:
@@ -221,7 +269,8 @@ def load_entry(path: Path) -> Entry:
     try:
         tensors, meta = read_header(path)
     except (OSError, ValueError):
-        return Entry(path, size, "broken", "?", 0, 0, {}, False, "", "", {})
+        return Entry(path, size, "broken", "?", 0, 0, {}, False, "", "", {},
+                     family=family_for(path.stem, "broken"))
     kind = classify(tensors, path.stem)
     base = detect_version(tensors, meta)
     n_t, n_p, dts = summarize(tensors)
@@ -230,7 +279,8 @@ def load_entry(path: Path) -> Entry:
     preview = sidecar if sidecar.exists() else None
     return Entry(path, size, kind, base, n_t, n_p, dts,
                  bool(find_thumb_uri(meta)) or preview is not None,
-                 title, extract_triggers(meta), meta, preview)
+                 title, extract_triggers(meta), meta, preview,
+                 family=family_for(path.stem, kind))
 
 
 def iter_safetensors(directory: Path):
@@ -422,6 +472,7 @@ def _columns() -> list:
         ("name",    L("名前", "Name"),       260, "w",      lambda e: e.path.name.lower(),  lambda e: e.path.name),
         ("kind",    L("種別", "Kind"),        90, "center", lambda e: e.kind,               lambda e: e.kind),
         ("base",    "Base",                    55, "center", lambda e: e.base,               lambda e: e.base),
+        ("family",  L("系統", "Family"),       65, "center", lambda e: e.family,             lambda e: e.family),
         ("size",    L("サイズ", "Size"),       85, "e",      lambda e: e.size,               lambda e: human_size(e.size)),
         ("tensors", L("テンソル", "Tensors"),  75, "e",      lambda e: e.n_tensors,          lambda e: str(e.n_tensors)),
         ("params",  L("パラメータ", "Params"),  80, "e",      lambda e: e.n_params,           lambda e: human_count(e.n_params)),
@@ -470,6 +521,7 @@ def run_gui(directory: Path) -> None:
             self.search_meta_var = tk.BooleanVar(value=False)   # False=ファイル名のみ / True=メタ込み
             self.kind_var = tk.StringVar(value="All")
             self.base_var = tk.StringVar(value="All")
+            self.family_var = tk.StringVar(value="All")
             self.sort_var = tk.StringVar(value=self.collabel["name"])
             self.desc_var = tk.BooleanVar(value=False)
             self.status_var = tk.StringVar(value=L("読み込み中…", "Loading…"))
@@ -503,6 +555,14 @@ def run_gui(directory: Path) -> None:
                                    values=["All", "sdxl", "sd15", "?"])
             base_cb.pack(side="left", padx=(4, 12))
             base_cb.bind("<<ComboboxSelected>>", lambda *_: self._populate())
+
+            ttk.Label(bar, text=L("系統:", "Family:")).pack(side="left")
+            # 値は scan 完了に合わせて _refresh_family_values() で更新する
+            self.family_cb = ttk.Combobox(bar, textvariable=self.family_var, width=10,
+                                          state="readonly",
+                                          values=["All", "pony", "non-pony", "(blank)"])
+            self.family_cb.pack(side="left", padx=(4, 12))
+            self.family_cb.bind("<<ComboboxSelected>>", lambda *_: self._populate())
 
             ttk.Label(bar, text=L("並べ替え:", "Sort:")).pack(side="left")
             sort = ttk.Combobox(bar, textvariable=self.sort_var, width=10, state="readonly",
@@ -548,6 +608,10 @@ def run_gui(directory: Path) -> None:
             for kind, color in (("broken", "#b00020"),
                                 ("embedding", "#2e7d32"), ("controlnet", "#8500b0")):
                 self.tree.tag_configure(kind, foreground=color)
+            # family ベースの色付け (Pony を標準=無印、それ以外を警告色)。
+            # base/inpainting/lora のときのみ tag を付けるので embedding 等は影響なし。
+            self.tree.tag_configure("fam_blank", background="#ffd0d0")  # 赤 = 未タグ/非Pony名
+            self.tree.tag_configure("fam_real",  background="#fff3a8")  # 黄 = real (Pony混在不可)
             self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
             # 右: 詳細 (サムネ + タブ: 概要 / メタデータ / テンソル)
@@ -640,6 +704,13 @@ def run_gui(directory: Path) -> None:
             kinds = ["All"] + sorted({e.kind for e in self.all_entries})
             if list(self.kind_cb["values"]) != kinds:
                 self.kind_cb["values"] = kinds
+            # family Combobox も実在する値で拡張 (常時: All / pony / non-pony / (blank) + 追加タグ)
+            fixed = ["All", "pony", "non-pony", "(blank)"]
+            extras = sorted({(e.family or "").lower() for e in self.all_entries
+                             if (e.family or "").lower() not in ("", "pony")})
+            values = fixed + extras
+            if list(self.family_cb["values"]) != values:
+                self.family_cb["values"] = values
 
         # ---- 一覧描画 --------------------------------------------------- #
         def _visible_sorted(self) -> list[Entry]:
@@ -648,11 +719,29 @@ def run_gui(directory: Path) -> None:
             base = self.base_var.get()
             keyfn = self.colkey.get(self.sort_col, lambda e: e.path.name.lower())
 
+            family_pick = self.family_var.get()
+
             def match(e: Entry) -> bool:
                 if kind != "All" and e.kind != kind:
                     return False
                 if base != "All" and e.base != base:
                     return False
+                if family_pick != "All":
+                    fam = (e.family or "").lower()
+                    is_relevant = e.kind in ("base", "inpainting", "lora")
+                    if family_pick == "pony":
+                        if not (is_relevant and fam == "pony"):
+                            return False
+                    elif family_pick == "non-pony":
+                        # base/lora かつ pony 以外。タグ済 (real/anime/...) も空欄も含む
+                        if not (is_relevant and fam != "pony"):
+                            return False
+                    elif family_pick == "(blank)":
+                        # base/inpainting で family 未設定 (要タグ付け対象)
+                        if not (e.kind in ("base", "inpainting") and fam == ""):
+                            return False
+                    elif fam != family_pick.lower():
+                        return False
                 if needle:
                     if self.search_meta_var.get():
                         cat = self.pv_cats.get(e.path.stem, "")
@@ -677,7 +766,14 @@ def run_gui(directory: Path) -> None:
             self.tree_iid = {}
             for e in self._visible_sorted():
                 iid = str(e.path)
-                self.tree.insert("", "end", iid=iid, tags=(e.kind,),
+                tags: tuple = (e.kind,)
+                fam = (e.family or "").lower()
+                if e.kind in ("base", "inpainting", "lora"):
+                    if fam == "":
+                        tags = tags + ("fam_blank",)
+                    elif fam == "real":
+                        tags = tags + ("fam_real",)
+                self.tree.insert("", "end", iid=iid, tags=tags,
                                  values=tuple(disp(e) for *_, disp in self.columns))
                 self.tree_iid[iid] = e
             if self.selected and str(self.selected.path) in self.tree_iid:

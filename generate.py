@@ -1898,6 +1898,18 @@ def main() -> None:
                     print(L(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped_pose)}",
                             f"  [pose-gate] OpenPose active → dropping pose LoRAs: {', '.join(dropped_pose)}"))
 
+            # family ゲート: 非 Pony base → Pony LoRA を除外。
+            # Pony LoRA は Pony Diffusion XL 専用 (score_9 系前提) で、Illustrious/realistic
+            # SDXL に乗せると subject が崩壊して人物が消える。embedding と同じ非対称ガード。
+            if picked_loras and ckpt_lane == "sdxl" \
+                    and not checkpoint_is_pony(checkpoint_path, checkpoint_data):
+                dropped_pony = [p.name for p, _ in picked_loras if _is_pony_name(p.stem)]
+                if dropped_pony:
+                    picked_loras = [(p, s) for p, s in picked_loras
+                                    if not _is_pony_name(p.stem)]
+                    print(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped_pony)}",
+                            f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped_pony)}"))
+
             print(f"  path      : {pipeline_label}")
             print(f"  checkpoint: {checkpoint_path.name} ({ckpt_lane.upper()})"
                   f"{L(' (未計測)', ' (unscored)') if checkpoint_path.stem not in checkpoint_data else ''}")

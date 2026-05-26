@@ -20,6 +20,7 @@ policy:
 """
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 import zipfile
@@ -65,7 +66,8 @@ LORA_DIR       = ROOT / "4_2_SDXL_LoRA"       # SDXL LoRA
 CONTROLNET_DIR = ROOT / "4_3_SDXL_ControlNet" # ControlNet (手動配置、scan しない)
 EMBED_DIR      = ROOT / "4_4_SDXL_Embedding"  # SDXL Embedding
 
-CACHE_FILE = ROOT / "tensors_cache.toml"
+CACHE_FILE      = ROOT / "tensors_cache.toml"
+CHECKPOINT_TOML = ROOT / "checkpoint.toml"
 
 TENSOR_EXTS = (".safetensors", ".ckpt", ".pt", ".bin")
 
@@ -327,6 +329,11 @@ def check_tensors() -> dict:
     update_sd15_lora_hint_toml()
     # LoRA_preview.toml (make_previews のプレビュー用カテゴリ) の過不足を点検・追従
     audit_lora_preview_toml()
+    # checkpoint.toml に未登録 checkpoint を score 0 / family 推定 / style=anime で登録 + 空欄補完
+    added, filled = update_checkpoint_toml()
+    if added or filled:
+        print(L(f"  checkpoint.toml: 新規 {added} 件 / 空欄補完 {filled} 件",
+                f"  checkpoint.toml: added {added} / filled {filled}"), flush=True)
 
     return {
         "checkpoint":      _count(CHECKPOINT_DIR),
@@ -402,6 +409,91 @@ def update_sd15_lora_hint_toml() -> int:
 
 
 # --------------------------------------------------------------------------- #
+# checkpoint.toml (family / style / score の台帳) の追従
+# --------------------------------------------------------------------------- #
+def _family_from_name(stem: str) -> str:
+    """ファイル名から checkpoint 系統を推定 (generate.py の同名関数と同一規則)。
+    判定不能は "" (ユーザが手で補正する想定)。メタには系統が無いのでファイル名が頼り。"""
+    s = stem.lower()
+    if ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s):
+        return "pony"
+    if ("ill" in s) or ("noob" in s) or ("nai" in s):
+        return "2d"
+    if ("real" in s) or ("photo" in s):
+        return "real"
+    return ""
+
+
+def update_checkpoint_toml() -> tuple[int, int]:
+    """3_1_SD15_checkpoint + 4_1_SDXL_checkpoint を scan して checkpoint.toml を追従。
+
+    - 新規 stem → score 0 (slow=fast=like=inference=0), family=ファイル名推定, style="anime" で登録
+    - 既存 stem の family が空欄 → 推定値で補完 (空欄のみ; 上書きはしない)
+    - 既存 stem の style が空欄 → "anime" で補完 (空欄のみ)
+    - 既存値 (slow/fast/like/inference や非空の family/style) は維持
+    - 戻り値: (新規追加数, 空欄補完数)
+    """
+    data: dict = {}
+    if CHECKPOINT_TOML.exists():
+        try:
+            data = tomllib.loads(CHECKPOINT_TOML.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(L(f"  [warn] checkpoint.toml 読込失敗 ({e}) — 既存無視で再生成",
+                    f"  [warn] checkpoint.toml load failed ({e}) — regenerating from scratch"), flush=True)
+            data = {}
+
+    # 物理ファイルとして実在する stem を集める (新規追加判定用)。
+    # 補完対象はゴースト entry も含めて data 全体に走らせる。
+    on_disk: set = set()
+    for d in (SD15_CKPT_DIR, CHECKPOINT_DIR):
+        if d.exists():
+            on_disk.update(p.stem for p in d.glob("*.safetensors"))
+
+    added = 0
+    filled = 0
+
+    # (1) 物理存在するが未登録の stem を新規追加 (score 0 / family 推定 / style="anime")
+    for stem in sorted(on_disk, key=str.lower):
+        if stem in data:
+            continue
+        fam_guess = _family_from_name(stem)
+        data[stem] = {
+            "slow": 0, "fast": 0, "like": 0, "inference": 0,
+            "style": "anime", "family": fam_guess,
+        }
+        added += 1
+        print(L(f"  checkpoint.toml + {stem} (family={fam_guess or '?'}, style=anime)",
+                f"  checkpoint.toml + {stem} (family={fam_guess or '?'}, style=anime)"), flush=True)
+
+    # (2) 既存 entry すべての空欄補完 (ゴースト含む)。
+    # 新規追加分は family/style/score が既に埋まっているので touched=False で素通り。
+    for stem, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        fam_guess = _family_from_name(stem)
+        cur_fam = str(entry.get("family") or "").strip()
+        cur_style = str(entry.get("style") or "").strip()
+        touched = False
+        if not cur_fam and fam_guess:
+            entry["family"] = fam_guess
+            touched = True
+        if not cur_style:
+            entry["style"] = "anime"
+            touched = True
+        for k in ("slow", "fast", "like", "inference"):
+            if k not in entry:
+                entry[k] = 0
+                touched = True
+        if touched:
+            filled += 1
+
+    data_sorted = dict(sorted(data.items(), key=lambda kv: kv[0].lower()))
+    with open(CHECKPOINT_TOML, "wb") as f:
+        tomli_w.dump(data_sorted, f)
+    return added, filled
+
+
+# --------------------------------------------------------------------------- #
 # LoRA_preview.toml (make_previews のプレビュー用カテゴリ表) の過不足チェック
 # --------------------------------------------------------------------------- #
 LORA_PREVIEW_TOML = ROOT / "LoRA_preview.toml"
@@ -457,6 +549,24 @@ def audit_lora_preview_toml() -> tuple[int, int]:
 # CLI
 # --------------------------------------------------------------------------- #
 def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=L("テンソル振り分け (既定) / 軽量メンテモード",
+                      "Triage tensors (default) / lightweight maintenance modes"))
+    ap.add_argument("--refresh-checkpoint-toml", action="store_true",
+                    help=L("振り分け処理を行わず、3_1/4_1 を scan して checkpoint.toml の "
+                           "family / style / score を読み直し・空欄補完のみ実行する",
+                           "Skip triage; just rescan 3_1/4_1 and refresh family / style / score "
+                           "fields in checkpoint.toml (fill-only, no overwrite)"))
+    args = ap.parse_args()
+
+    if args.refresh_checkpoint_toml:
+        print(L("=== checkpoint.toml 読み直しモード (ファイル移動なし) ===",
+                "=== refresh-checkpoint-toml mode (no file moves) ==="))
+        added, filled = update_checkpoint_toml()
+        print(L(f"checkpoint.toml: 新規 {added} 件 / 空欄補完 {filled} 件",
+                f"checkpoint.toml: added {added} / filled {filled}"))
+        return
+
     counts = check_tensors()
     print()
     print(L("=== 振り分け結果 ===", "=== Triage Results ==="))
