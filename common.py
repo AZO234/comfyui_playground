@@ -179,43 +179,55 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
     has_where = False
     many = False
     if who_entries:
-        chosen = random.choice(who_entries)
+        # v05 形式: [char, weight(int), has_wearing, has_motion, has_where, many, kw_str]
+        # 旧形式 (v04/v03/v02/v01) は weight 列無し → 一律 weight=1 で重み抽選
+        def _who_weight(e):
+            if len(e) >= 2 and isinstance(e[1], (int, float)) and not isinstance(e[1], bool):
+                return max(1, int(e[1]))
+            return 1
+        chosen = random.choices(who_entries,
+                                weights=[_who_weight(e) for e in who_entries], k=1)[0]
         char = str(chosen[0]) if chosen else ""
         kw_value: str | None = None
-        # 3 要素目 (index 2): bool (v02+ では has_motion) or str (旧 v01 kw)
-        if len(chosen) >= 3:
-            third = chosen[2]
-            if isinstance(third, bool):
-                # v02+ ルート: bool 1 個目 = has_wearing
-                has_wearing = bool(chosen[1]) if len(chosen) >= 2 else False
-                has_motion = third
-                # 4 要素目 (index 3): bool (has_where、v03) or str (v02 kw)
-                if len(chosen) >= 4:
-                    fourth = chosen[3]
-                    if isinstance(fourth, bool):
-                        has_where = fourth
-                        # 5 要素目 (index 4): bool (many、v04) or str (kw、v03)
-                        if len(chosen) >= 5:
-                            fifth = chosen[4]
-                            if isinstance(fifth, bool):
-                                many = fifth
-                                # 6 要素目 (index 5): kw (v04)
-                                if len(chosen) >= 6 and chosen[5]:
-                                    kw_value = str(chosen[5])
-                            elif fifth:
-                                kw_value = str(fifth)
-                    else:
-                        # fourth is str = v02 kw, has_where defaults False
-                        if fourth:
-                            kw_value = str(fourth)
-            else:
-                # third is str = 旧 v01 形式 [char, has_motion, kw]、has_wearing/has_where とも False
-                has_motion = bool(chosen[1]) if len(chosen) >= 2 else False
-                if third:
-                    kw_value = str(third)
-        elif len(chosen) >= 2:
-            # 2 要素のみ (kw 無し v01 風): bool 1 個目 = has_motion 扱い
-            has_motion = bool(chosen[1])
+        is_v05 = (len(chosen) >= 2 and isinstance(chosen[1], (int, float))
+                  and not isinstance(chosen[1], bool))
+        if is_v05:
+            has_wearing = bool(chosen[2]) if len(chosen) >= 3 else False
+            has_motion  = bool(chosen[3]) if len(chosen) >= 4 else False
+            has_where   = bool(chosen[4]) if len(chosen) >= 5 else False
+            many        = bool(chosen[5]) if len(chosen) >= 6 else False
+            if len(chosen) >= 7 and chosen[6]:
+                kw_value = str(chosen[6])
+        else:
+            # 旧形式パース (3 要素目で v01 vs v02+ を判定。bool=v02+ / str=v01)
+            if len(chosen) >= 3:
+                third = chosen[2]
+                if isinstance(third, bool):
+                    # v02+: [char, has_wearing, has_motion, has_where?, many?, kw?]
+                    has_wearing = bool(chosen[1]) if len(chosen) >= 2 else False
+                    has_motion = third
+                    if len(chosen) >= 4:
+                        fourth = chosen[3]
+                        if isinstance(fourth, bool):
+                            has_where = fourth
+                            if len(chosen) >= 5:
+                                fifth = chosen[4]
+                                if isinstance(fifth, bool):
+                                    many = fifth
+                                    if len(chosen) >= 6 and chosen[5]:
+                                        kw_value = str(chosen[5])
+                                elif fifth:
+                                    kw_value = str(fifth)
+                        else:
+                            if fourth:
+                                kw_value = str(fourth)
+                else:
+                    # v01: [char, has_motion, kw]
+                    has_motion = bool(chosen[1]) if len(chosen) >= 2 else False
+                    if third:
+                        kw_value = str(third)
+            elif len(chosen) >= 2:
+                has_motion = bool(chosen[1])
         if char:
             parts.append(char)
         if kw_value:
@@ -264,10 +276,25 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
             lora_keywords.append(kw)
 
     # at 場所 (has_where=true なら キャラ文字列に既に場所が含まれているのでスキップ)
+    # 各エントリは "place"(str, weight=1 default) または [place, weight, kw_str]
     if not has_where:
         at_list = cfg.get("at") or []
         if at_list:
-            parts.append(f"at {random.choice(at_list)}")
+            at_pool: list[str] = []
+            at_w: list[int] = []
+            at_kw: list[str] = []
+            for e in at_list:
+                if isinstance(e, str):
+                    at_pool.append(e); at_w.append(1); at_kw.append("")
+                elif isinstance(e, (list, tuple)) and e:
+                    at_pool.append(str(e[0]))
+                    at_w.append(max(1, int(e[1])) if len(e) >= 2 else 1)
+                    at_kw.append(str(e[2]) if len(e) >= 3 else "")
+            if at_pool:
+                idx = random.choices(range(len(at_pool)), weights=at_w, k=1)[0]
+                parts.append(f"at {at_pool[idx]}")
+                if at_kw[idx]:
+                    lora_keywords.append(at_kw[idx])
 
     # with 明るさ
     lighting_list = cfg.get("lighting") or []
@@ -399,7 +426,7 @@ def pick_lora_by_keywords(compat_loras: list[Path], keywords: list[str],
 
     - 各 LoRA について `corpus[stem]` (build_lora_corpus 製、stem + preset hints + trigger) を
       lowercase で部分一致検査 (corpus 未指定なら stem 単独で検査、後方互換)。
-    - match があれば **90% で match 候補から random.choice**、10% で全 compat_loras から random.choice
+    - match があれば **97% で match 候補から random.choice**、3% で全 compat_loras から random.choice
       (= 従来抽選にフォールバック、用語に縛られない多様性確保)。
     - match が無ければ 100% 全 compat_loras から random.choice (= 従来抽選と同義)。
     - 呼び出し側で `args.lora_prob` ゲートを通す前提。compat_loras が空なら None。
@@ -413,7 +440,7 @@ def pick_lora_by_keywords(compat_loras: list[Path], keywords: list[str],
             text = (corpus.get(lora.stem) if corpus is not None else None) or lora.stem.lower()
             if _text_matches_clauses(text, clauses):
                 matches.append(lora)
-        if matches and random.random() < 0.90:
+        if matches and random.random() < 0.97:
             return random.choice(matches)
     return random.choice(compat_loras)
 
@@ -433,7 +460,7 @@ def pick_n_loras_by_keywords(
 
     - keywords が空 → 全 LoRA から random.choice で n_target 個
     - keywords が n_target 未満 → 全 kw を使い切り、実 n はその数に縮む
-    - 各 pick で `pick_lora_by_keywords` の 90% match / 10% random フォールバックは生きる
+    - 各 pick で `pick_lora_by_keywords` の 97% match / 3% random フォールバックは生きる
     - 既に選ばれた LoRA は次の pick の候補から除外、同じ LoRA は重複しない
 
     呼び出し側は: ① n=1 なら従来通り 1 LoRA を fuse、② n>1 なら set_adapters で複数を adapter

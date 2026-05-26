@@ -4,13 +4,15 @@
 # `**word**` 等の強調記法は最終的に normalize_emphasis で `(word:1.3)` 形式に変換される。
 #
 # 各セクションのエントリは末尾に **LoRA キーワード** (カンマ区切り) を追加できる:
-#   who         : [character, has_wearing, has_motion?, has_where?, many?, kw?]
+#   who         : [character, weight, has_wearing, has_motion?, has_where?, many?, kw?]   (v05)
+#                  ※ index 1 が int weight。旧 v01-v04 形式 (weight 無し) も自動判別で互換。
 #   wearing     : [clothing, weight, kw?]
 #   with_items  : [item, weight, kw?]
 #   motion      : [motion, weight, kw?]
+#   at          : "place" (str、weight=1 デフォルト) または [place, weight, kw?]
 # 採用されたエントリの kw を全部集めて、生成のたびに pick_lora_by_keywords で:
-#   - 90% : LoRA 名 (stem) に kw が部分一致するものから抽選
-#   - 10% : 全 LoRA からランダム抽選 (= マッチを意図的に避ける)
+#   - 97% : LoRA 名 (stem) に kw が部分一致するものから抽選
+#   - 3%  : 全 LoRA からランダム抽選 (= マッチを意図的に避ける)
 # kw 列を省略した既存エントリ ([value, weight] のみ) は従来抽選にフォールバック。
 
 # 誰が: [character, has_wearing, has_motion, has_where, many, lora_keywords]
@@ -35,7 +37,7 @@
 # 1 つを均等ランダム抽選
 who = [
     # plane
-    ["**1-2 ladies**", false, false, false, true, ""],
+    ["**1-2 ladies**", 100, false, false, false, true, ""],
 ]
 
 # 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
@@ -45,7 +47,9 @@ who = [
 # 1 つを重み抽選
 wearing = [
     ["nothing", 30, "naked"],
-    ["dress", 50, "dress"],
+    ["lingerie", 20, "lingerie"],
+    ["swimsuit", 10, "swimsuit"],
+    ["dress", 10, "dress"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
@@ -54,7 +58,7 @@ wearing = [
 # - 採用された各 item は "with {item}" として個別句に展開される
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
-    ["nothing", 50, ""],
+    ["nothing", 100, ""],
 ]
 
 # 動作: [motion, weight] または [motion, weight, lora_keywords]
@@ -69,7 +73,11 @@ motion = [
 
 # at 場所: 1 つを均等ランダム抽選、"at {place}" 形式
 at = [
-    "room",
+    ["room", 50, ""],
+    ["beach", 5, ""],
+    ["on cauch", 10, ""],
+    ["rooms bed", 10, ""],
+    ["bathroom", 5, ""],
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式

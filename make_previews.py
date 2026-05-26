@@ -62,7 +62,8 @@ PROMPT_TOML = ROOT / "prompt.toml"
 # (upper body だとボトム系 LoRA の効果が見えないため)。
 DEFAULT_POSITIVE = "1lady, solo, full body, standing, looking at viewer, simple background"
 
-CATEGORIES_FILE = ROOT / "LoRA_preview.toml"
+CATEGORIES_FILE = ROOT / "LoRA_preview.toml"             # [SD15_/SDXL_] {categories,prompts}
+PREVIEW_SETTINGS_TOML = ROOT / "preview_settings.toml"   # [tensors_dirs] / [LoRA_preview_template] / [checkpoint_preview_template]
 
 # プレビュー用カテゴリ → positive スキャフォールド。後ろに {hint}, {trigger} が足される。
 #   ware=着衣 / doing{1,2,3,mob}=行為(人数別) / object=物体 / part=モデル部位 / view=視点 /
@@ -250,43 +251,125 @@ def guess_category(stem: str) -> str:
     return "doing2" if (_name_tokens(stem) & _DOING_TOKENS) else "ware"
 
 
-def load_categories(path: Path) -> tuple[dict, dict, dict, set]:
-    """(templates, stem→category, stem→個別カスタムprompt, 明示template キー集合) を返す。"""
-    templates = dict(DEFAULT_TEMPLATES)
-    cats: dict[str, str] = {}
-    prompts: dict[str, str] = {}
-    toml_keys: set = set()
-    if path.exists():
-        import tomllib
-        with open(path, "rb") as f:
-            cfg = tomllib.load(f)
-        tpl = cfg.get("templates") or {}
-        toml_keys = set(tpl)
-        templates.update({k: str(v) for k, v in tpl.items()})
-        cats = {str(k): str(v) for k, v in (cfg.get("categories") or {}).items()}
-        prompts = {str(k): str(v) for k, v in (cfg.get("prompts") or {}).items() if str(v).strip()}
-    return templates, cats, prompts, toml_keys
+def load_preview_config(template_path: Path = PREVIEW_SETTINGS_TOML,
+                        lora_preview_path: Path = CATEGORIES_FILE
+                        ) -> tuple[dict, dict, dict, dict]:
+    """新スキーマ: preview_template.toml + LoRA_preview.toml を読む。
 
-
-def write_categories(path: Path, loras: list[Path], guess: bool = False) -> None:
-    """全 LoRA のカテゴリ一覧を TOML に書き出す (既存の手編集は常に保持)。
-
-    guess=False (既定): 新規エントリは ware。guess=True: ファイル名から doing を推定。
+    戻り値:
+      lora_templates: {category: scaffold}  ← preview_template.toml [LoRA_preview_template] (DEFAULT_TEMPLATES と merge)
+      ckpt_templates: {family|'default': scaffold} ← [checkpoint_preview_template] (default は DEFAULT_POSITIVE)
+      cats_by_ver:    {"sd15": {stem→cat}, "sdxl": {stem→cat}}
+      prompts_by_ver: {"sd15": {stem→prompt}, "sdxl": {stem→prompt}}
     """
+    import tomllib
+    lora_templates = dict(DEFAULT_TEMPLATES)
+    ckpt_templates = {"default": DEFAULT_POSITIVE}
+    if template_path.exists():
+        try:
+            td = tomllib.loads(template_path.read_text(encoding="utf-8"))
+            for k, v in (td.get("LoRA_preview_template") or {}).items():
+                lora_templates[str(k)] = str(v)
+            for k, v in (td.get("checkpoint_preview_template") or {}).items():
+                ckpt_templates[str(k)] = str(v)
+        except Exception:
+            pass
+    cats_by_ver = {"sd15": {}, "sdxl": {}}
+    prompts_by_ver = {"sd15": {}, "sdxl": {}}
+    if lora_preview_path.exists():
+        try:
+            lp = tomllib.loads(lora_preview_path.read_text(encoding="utf-8"))
+            cats_by_ver["sd15"] = {str(k): str(v) for k, v in (lp.get("SD15_categories") or {}).items()}
+            cats_by_ver["sdxl"] = {str(k): str(v) for k, v in (lp.get("SDXL_categories") or {}).items()}
+            prompts_by_ver["sd15"] = {str(k): str(v) for k, v in (lp.get("SD15_prompts") or {}).items() if str(v).strip()}
+            prompts_by_ver["sdxl"] = {str(k): str(v) for k, v in (lp.get("SDXL_prompts") or {}).items() if str(v).strip()}
+        except Exception:
+            pass
+    return lora_templates, ckpt_templates, cats_by_ver, prompts_by_ver
+
+
+def write_preview_categories(guess: bool = False,
+                             lora_preview_path: Path = CATEGORIES_FILE) -> None:
+    """全 LoRA を SD15_/SDXL_categories に書き出す (既存 cats/prompts は保持)。
+    --init-categories から呼ぶ。templates は preview_template.toml 側を編集する。"""
+    import tomllib
     import tomli_w
-    templates, existing, prompts, _ = load_categories(path)
-    cats = {p.stem: existing.get(p.stem) or (guess_category(p.stem) if guess else "ware")
-            for p in loras}
-    # [prompts] (個別カスタムプロンプト) は手編集分を保持。空表でもセクションは残す。
-    doc = {"templates": templates,
-           "prompts": dict(sorted(prompts.items(), key=lambda kv: kv[0].lower())),
-           "categories": dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))}
-    with open(path, "wb") as f:
-        tomli_w.dump(doc, f)
-    n_doing = sum(v == "doing" for v in cats.values())
-    tail = L(f" (doing 推定 {n_doing})", f" (guessed doing {n_doing})") if guess else ""
-    print(L(f"{path.name} を書き出し: {len(cats)} 件{tail}。ware/doing/object/part/view/unknown を手で書き換え可",
-            f"wrote {path.name}: {len(cats)} entries{tail}; edit ware/doing/object/part/view/unknown by hand"))
+    data: dict = {}
+    if lora_preview_path.exists():
+        try:
+            data = tomllib.loads(lora_preview_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    for ver_key in ("SD15", "SDXL"):
+        cat_key = f"{ver_key}_categories"
+        existing = dict(data.get(cat_key) or {})
+        ver_dir = SD15_LORA_DIR if ver_key == "SD15" else SDXL_LORA_DIR
+        new_cats = {p.stem: existing.get(p.stem)
+                       or (guess_category(p.stem) if guess else "ware")
+                    for p in sorted(ver_dir.glob("*.safetensors"))}
+        data[cat_key] = dict(sorted(new_cats.items(), key=lambda kv: kv[0].lower()))
+        if f"{ver_key}_prompts" not in data:
+            data[f"{ver_key}_prompts"] = {}
+    # 並び順: SD15_categories, SD15_prompts, SDXL_categories, SDXL_prompts
+    ordered = {k: data[k] for k in ("SD15_categories", "SD15_prompts",
+                                     "SDXL_categories", "SDXL_prompts") if k in data}
+    # その他のキー (旧 templates 等) は捨てる (templates は preview_template.toml へ)
+    with open(lora_preview_path, "wb") as f:
+        tomli_w.dump(ordered, f)
+    n_sd15 = len(ordered.get("SD15_categories", {}))
+    n_sdxl = len(ordered.get("SDXL_categories", {}))
+    print(L(f"{lora_preview_path.name} を書き出し: SD15 {n_sd15} 件 / SDXL {n_sdxl} 件",
+            f"wrote {lora_preview_path.name}: SD15 {n_sd15} / SDXL {n_sdxl} entries"))
+
+
+def save_preview_entry(stem: str, version: str, category: str, custom_prompt: str,
+                       lora_preview_path: Path = CATEGORIES_FILE) -> None:
+    """1 件分の category + custom prompt を {SD15,SDXL}_{categories,prompts} に書き込む。"""
+    import tomllib
+    import tomli_w
+    if version not in ("sd15", "sdxl"):
+        raise ValueError(f"unknown version: {version}")
+    data: dict = {}
+    if lora_preview_path.exists():
+        try:
+            data = tomllib.loads(lora_preview_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    prefix = "SD15" if version == "sd15" else "SDXL"
+    cats = dict(data.get(f"{prefix}_categories") or {})
+    prompts = dict(data.get(f"{prefix}_prompts") or {})
+    cats[stem] = category
+    cp = (custom_prompt or "").strip()
+    if cp:
+        prompts[stem] = cp
+    else:
+        prompts.pop(stem, None)
+    data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    data[f"{prefix}_prompts"] = dict(sorted(prompts.items(), key=lambda kv: kv[0].lower()))
+    with open(lora_preview_path, "wb") as f:
+        tomli_w.dump(data, f)
+
+
+def set_preview_categories_for_version(version: str, stems: list[str], category: str,
+                                       lora_preview_path: Path = CATEGORIES_FILE) -> None:
+    """同一版の複数 stem の category を一括設定 (prompts は保持、1 回書き込み)。"""
+    import tomllib
+    import tomli_w
+    if version not in ("sd15", "sdxl"):
+        raise ValueError(f"unknown version: {version}")
+    data: dict = {}
+    if lora_preview_path.exists():
+        try:
+            data = tomllib.loads(lora_preview_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    prefix = "SD15" if version == "sd15" else "SDXL"
+    cats = dict(data.get(f"{prefix}_categories") or {})
+    for s in stems:
+        cats[s] = category
+    data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    with open(lora_preview_path, "wb") as f:
+        tomli_w.dump(data, f)
 
 
 # --------------------------------------------------------------------------- #
@@ -337,17 +420,21 @@ def render_multi(*, checkpoint_name: str, loras, positive: str, negative: str, v
     return shots[0] if len(shots) == 1 else _grid_2x2(shots)
 
 
-def build_job(kind: str, path: Path, *, templates: dict, cats_map: dict, prompts_map: dict,
+def build_job(kind: str, path: Path, *, lora_templates: dict, ckpt_templates: dict,
+              cats_by_ver: dict, prompts_by_ver: dict,
               bases: dict, prompt: str, extra: str = "", lora_strength: float = 0.8):
     """1 ターゲットの生成内容を組む。
 
     戻り値: (positive, checkpoint_name, loras, version, plan)。
     LoRA で適合ベースが無ければ None。main ループと regenerate() が共有する。
+    checkpoint は ckpt_templates[family] (なければ default) を使う (--prompt は最後の保険)。
+    LoRA は version の cats/prompts マップから引く。
     """
     version = tensor_version(path)
     if kind == "checkpoint":
         family = tensor_family(path)
-        positive = build_positive(prompt, family)
+        scaffold = ckpt_templates.get(family) or ckpt_templates.get("default") or prompt
+        positive = build_positive(scaffold, family)
         ckpt_name, loras = path.name, None
         plan = f"ckpt={path.stem} [{version}/{family}]"
     else:
@@ -356,6 +443,8 @@ def build_job(kind: str, path: Path, *, templates: dict, cats_map: dict, prompts
             return None
         triggers = top_triggers(path)
         family = tensor_family(base)
+        cats_map = cats_by_ver.get(version, {})
+        prompts_map = prompts_by_ver.get(version, {})
         custom = prompts_map.get(path.stem, "")
         if custom:
             # 個別カスタムプロンプト (unknown 等)。トリガー未記載なら活性化のため足す
@@ -365,7 +454,7 @@ def build_job(kind: str, path: Path, *, templates: dict, cats_map: dict, prompts
             plan = f"lora={path.stem} [{version}] cat=custom base={base.stem} prompt='{custom[:48]}'"
         else:
             cat = cats_map.get(path.stem, "ware")           # 未記載は ware
-            scaffold = templates.get(cat, templates["ware"])
+            scaffold = lora_templates.get(cat, lora_templates["ware"])
             hint = clean_name_hint(path.stem)
             lora_tokens = ", ".join([x for x in ([hint] + triggers) if x])
             positive = build_positive(scaffold, family, lora_tokens)
@@ -392,9 +481,11 @@ def regenerate(path: Path, *, seed: Optional[int] = None, steps: int = 24, cfg: 
     kind = ("checkpoint" if parent in (SD15_CHECKPOINT_DIR.resolve(), SDXL_CHECKPOINT_DIR.resolve())
             else "lora")
     write_extra_model_paths()
-    templates, cats_map, prompts_map, _ = load_categories(categories_file)
+    lora_templates, ckpt_templates, cats_by_ver, prompts_by_ver = load_preview_config(
+        lora_preview_path=categories_file)
     bases = build_family_bases({})
-    job = build_job(kind, path, templates=templates, cats_map=cats_map, prompts_map=prompts_map,
+    job = build_job(kind, path, lora_templates=lora_templates, ckpt_templates=ckpt_templates,
+                    cats_by_ver=cats_by_ver, prompts_by_ver=prompts_by_ver,
                     bases=bases, prompt=DEFAULT_POSITIVE, extra=extra, lora_strength=lora_strength)
     if job is None:
         raise RuntimeError(f"no matching base for {path.stem}")
@@ -474,10 +565,8 @@ def main() -> None:
 
     cat_file = Path(args.categories)
     if args.init_categories:
-        loras = gather([SD15_LORA_DIR, SDXL_LORA_DIR])
-        if args.version != "all":
-            loras = [p for p in loras if tensor_version(p) == args.version]
-        write_categories(cat_file, loras, guess=args.guess)
+        # SD15/SDXL とも実 dir をスキャンして version-split TOML を初期化 (既存手編集は保持)
+        write_preview_categories(guess=args.guess, lora_preview_path=cat_file)
         return
     if args.files:
         # 指定ファイルだけ再生成 (tensors_view が subprocess で呼ぶ。GUI を torch から隔離)
@@ -495,9 +584,11 @@ def main() -> None:
         print(L(f"=== files 完了: {n_ok} ok / {n_fail} fail ===",
                 f"=== files done: {n_ok} ok / {n_fail} fail ==="))
         return
-    templates, cats_map, prompts_map, toml_keys = load_categories(cat_file)
-    if "ware" not in toml_keys:
-        templates["ware"] = args.prompt   # TOML が ware を明示してなければ --prompt を反映
+    lora_templates, ckpt_templates, cats_by_ver, prompts_by_ver = load_preview_config(
+        lora_preview_path=cat_file)
+    # preview_template.toml が ware を持っていなければ --prompt を反映
+    if not PREVIEW_SETTINGS_TOML.exists():
+        lora_templates["ware"] = args.prompt
 
     negative = load_negative()
     bases = build_family_bases({
@@ -534,8 +625,9 @@ def main() -> None:
             skipped += 1
             continue
 
-        job = build_job(kind, path, templates=templates, cats_map=cats_map,
-                        prompts_map=prompts_map, bases=bases, prompt=args.prompt,
+        job = build_job(kind, path, lora_templates=lora_templates, ckpt_templates=ckpt_templates,
+                        cats_by_ver=cats_by_ver, prompts_by_ver=prompts_by_ver,
+                        bases=bases, prompt=args.prompt,
                         extra=args.extra, lora_strength=args.lora_strength)
         if job is None:
             print(L(f"  [warn] {path.stem}: 適合ベースなし、スキップ",

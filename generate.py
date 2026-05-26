@@ -60,7 +60,7 @@ from common import (
 # A1111 メタ書き込みは pngutil の serializer を流用
 from pngutil import serialize_a1111_parameters, write_text_chunks
 # tensors triage は起動時に必ず実行
-from tensors import check_tensors
+from dist_tensors import check_tensors
 
 # --------------------------------------------------------------------------- #
 # 定数
@@ -86,7 +86,7 @@ UPSCALED_DIR     = ROOT / "5_2_upscaled"
 WORKFLOW_DUMP_DIR = ROOT / "workflow_dump"   # --dump-workflow: 組んだ API workflow JSON の出力先
 CHECKPOINT_TOML  = ROOT / "checkpoint.toml"
 LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
-SDXL_LORA_TOML   = ROOT / "SDXL_LoRA.toml"   # SDXL LoRA の subject (pose のみ機能的)
+SDXL_LORA_HINT_TOML = ROOT / "SDXL_LoRA_hint.toml"   # SDXL LoRA の subject (pose のみ機能的)
 
 # checkpoint.toml の `style` → 使う Real-ESRGAN モデル
 _UPSCALE_MODEL_BY_STYLE = {
@@ -762,14 +762,14 @@ def load_lora_keywords_toml() -> dict:
 
 
 def load_sdxl_lora_subjects() -> dict[str, str]:
-    """SDXL_LoRA.toml から {stem: subject(lower)} を返す。subject="pose" のみ機能的
+    """SDXL_LoRA_hint.toml から {stem: subject(lower)} を返す。subject="pose" のみ機能的
     (OpenPose 段で除外)。無ければ空 dict。"""
-    if not SDXL_LORA_TOML.exists():
+    if not SDXL_LORA_HINT_TOML.exists():
         return {}
     try:
-        data = tomllib.loads(SDXL_LORA_TOML.read_text(encoding="utf-8"))
+        data = tomllib.loads(SDXL_LORA_HINT_TOML.read_text(encoding="utf-8"))
     except Exception as e:
-        print(L(f"[警告] SDXL_LoRA.toml パース失敗 ({e})、空として扱う", f"[warn] SDXL_LoRA.toml parse failed ({e}), treating as empty"), flush=True)
+        print(L(f"[警告] SDXL_LoRA_hint.toml パース失敗 ({e})、空として扱う", f"[warn] SDXL_LoRA_hint.toml parse failed ({e}), treating as empty"), flush=True)
         return {}
     return {stem: str((v or {}).get("subject") or "").strip().lower() for stem, v in data.items()}
 
@@ -1888,7 +1888,7 @@ def main() -> None:
                             f"  [warn] ControlNet source image upload failed ({e}), CN OFF"), flush=True)
                             picked_controlnet = None
 
-            # OpenPose 有効時は pose 系 LoRA を除外 (姿勢の取り合い回避、SDXL_LoRA.toml subject=pose)
+            # OpenPose 有効時は pose 系 LoRA を除外 (姿勢の取り合い回避、SDXL_LoRA_hint.toml subject=pose)
             if controlnet_mode == "openpose" and picked_loras:
                 dropped_pose = [p.name for p, _ in picked_loras
                                 if sdxl_lora_subjects.get(p.stem) == "pose"]

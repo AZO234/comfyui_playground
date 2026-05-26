@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tensors.py - `2_0_tensors` 受入トレーのテンソルを分類して各 dir へ振り分ける CLI。
+"""dist_tensors.py - `2_0_tensors` 受入トレーのテンソルを分類して各 dir へ振り分ける CLI。
 
 処理内容 (idempotent、何度実行しても安全):
     - 2_0_tensors の zip 展開 / ckpt → safetensors 変換
@@ -16,7 +16,7 @@ policy:
     - SD15 / SDXL の base・LoRA・Embedding dir は scan する (直接投入分も dedup + 再分類)
 
 使い方:
-    python tensors.py
+    python dist_tensors.py
 """
 from __future__ import annotations
 
@@ -322,8 +322,9 @@ def check_tensors() -> dict:
             cache[k] = {kk: vv for kk, vv in v.items() if vv is not None}
     save_cache(cache)
 
-    # SDXL LoRA の種別表 (subject) を更新 (ユーザ記入分は保持、ヒントは再生成)
-    update_sdxl_lora_toml()
+    # SDXL/SD15 LoRA の種別 hint を更新 (ユーザ記入分は保持、hint は再生成)
+    update_sdxl_lora_hint_toml()
+    update_sd15_lora_hint_toml()
     # LoRA_preview.toml (make_previews のプレビュー用カテゴリ) の過不足を点検・追従
     audit_lora_preview_toml()
 
@@ -344,9 +345,10 @@ def _count(d: Path) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# SDXL_LoRA.toml (SDXL LoRA の種別 subject。pose のみ機能的=OpenPose ゲート用)
+# {SDXL,SD15}_LoRA_hint.toml (LoRA の種別 subject + ヒント。subject="pose" のみ機能的)
 # --------------------------------------------------------------------------- #
-SDXL_LORA_TOML = ROOT / "SDXL_LoRA.toml"
+SDXL_LORA_HINT_TOML = ROOT / "SDXL_LoRA_hint.toml"
+SD15_LORA_HINT_TOML = ROOT / "SD15_LoRA_hint.toml"
 _LORA_HINT_NOISE = {"v1", "v2", "v3", "v4", "v5", "v6", "v10", "v20", "v30", "v50",
                     "sdxl", "xl", "lora", "il", "ill", "pony", "fp16", "bf16", ""}
 
@@ -363,23 +365,18 @@ def _lora_hint(stem: str) -> str:
     return ", ".join(seen)[:120]
 
 
-def update_sdxl_lora_toml() -> int:
-    """4_2_SDXL_LoRA の各 LoRA に `subject` を持つ SDXL_LoRA.toml を生成/更新。
-
-    - `subject` はユーザ記入 (object/accessory/ware/facial/pose 等)。**既存値は保持**。
-    - 行末 `# hint:` はファイル名由来の自動ヒント (毎回再生成・編集不要)。
-    - 機能的に意味を持つのは `subject="pose"` のみ (generate.py が OpenPose 段で除外)。
-    """
-    loras = sorted(LORA_DIR.glob("*.safetensors"))
+def _write_lora_hint_toml(toml_path: Path, lora_dir: Path, header_label: str) -> int:
+    """指定 dir の LoRA を hint toml に書き出す共通実装。既存 subject は保持、hint は再生成。"""
+    loras = sorted(lora_dir.glob("*.safetensors"))
     existing: dict = {}
-    if SDXL_LORA_TOML.exists():
+    if toml_path.exists():
         try:
-            existing = tomllib.loads(SDXL_LORA_TOML.read_text(encoding="utf-8"))
+            existing = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
     lines = [
-        "# SDXL LoRA の種別。subject に object / accessory / ware / facial / pose 等を記入。",
-        '# 機能的に意味を持つのは subject="pose" のみ (OpenPose と競合 → 清書段で自動除外)。',
+        f"# {header_label} LoRA の種別。subject に object / accessory / ware / facial / pose 等を記入。",
+        '# 機能的に意味を持つのは subject="pose" のみ (OpenPose と競合 → 清書段で自動除外、SDXL のみ)。',
         "# 行末 # hint: はファイル名由来の自動ヒント (毎回再生成・編集不要)。",
         "",
     ]
@@ -390,8 +387,18 @@ def update_sdxl_lora_toml() -> int:
         lines.append(f'["{stem}"]')
         lines.append(f'subject = "{subj}"' + (f"  # hint: {hint}" if hint else ""))
         lines.append("")
-    SDXL_LORA_TOML.write_text("\n".join(lines), encoding="utf-8")
+    toml_path.write_text("\n".join(lines), encoding="utf-8")
     return len(loras)
+
+
+def update_sdxl_lora_hint_toml() -> int:
+    """4_2_SDXL_LoRA → SDXL_LoRA_hint.toml を更新。"""
+    return _write_lora_hint_toml(SDXL_LORA_HINT_TOML, LORA_DIR, "SDXL")
+
+
+def update_sd15_lora_hint_toml() -> int:
+    """3_2_SD15_LoRA → SD15_LoRA_hint.toml を更新 (SDXL と同形式)。"""
+    return _write_lora_hint_toml(SD15_LORA_HINT_TOML, SD15_LORA_DIR, "SD15")
 
 
 # --------------------------------------------------------------------------- #
@@ -401,16 +408,16 @@ LORA_PREVIEW_TOML = ROOT / "LoRA_preview.toml"
 
 
 def audit_lora_preview_toml() -> tuple[int, int]:
-    """LoRA_preview.toml と LoRA 実体 (SD15 3_2 + SDXL 4_2) の過不足を点検する。
+    """LoRA_preview.toml ({SD15,SDXL}_categories) と LoRA 実体 (SD15 3_2 + SDXL 4_2) の過不足を点検。
 
-    - 不足 (実体はあるが toml に無い LoRA) → category="ware" で自動追加。
+    - 不足 (実体はあるが該当 toml セクションに無い LoRA) → category="ware" で自動追加。
     - 余剰 (toml にあるが実体が無い) → 警告のみ (手編集の category を失わないため削除しない。
       完全に整理するなら `make_previews.py --init-categories`)。
-    `[templates]` と既存 category 値は保持。同期済みなら無出力。戻り値: (追加数, 余剰数)。
+    既存 category 値は保持。同期済みなら無出力。戻り値: (追加合計, 余剰合計)。
     """
-    stems = sorted({p.stem for d in (SD15_LORA_DIR, LORA_DIR) if d.exists()
-                    for p in d.glob("*.safetensors")})
-    if not stems:
+    sd15_stems = sorted({p.stem for p in SD15_LORA_DIR.glob("*.safetensors")}) if SD15_LORA_DIR.exists() else []
+    sdxl_stems = sorted({p.stem for p in LORA_DIR.glob("*.safetensors")}) if LORA_DIR.exists() else []
+    if not sd15_stems and not sdxl_stems:
         return (0, 0)
     data: dict = {}
     if LORA_PREVIEW_TOML.exists():
@@ -418,25 +425,32 @@ def audit_lora_preview_toml() -> tuple[int, int]:
             data = tomllib.loads(LORA_PREVIEW_TOML.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    existing = dict(data.get("categories") or {})
-    stem_set = set(stems)
-    missing = [s for s in stems if s not in existing]
-    stale = [s for s in existing if s not in stem_set]
-
-    if missing:
-        for s in missing:
-            existing[s] = "ware"
-        data["categories"] = dict(sorted(existing.items(), key=lambda kv: kv[0].lower()))
+    total_missing = total_stale = 0
+    dirty = False
+    for prefix, stems in (("SD15", sd15_stems), ("SDXL", sdxl_stems)):
+        cat_key = f"{prefix}_categories"
+        existing = dict(data.get(cat_key) or {})
+        stem_set = set(stems)
+        missing = [s for s in stems if s not in existing]
+        stale = [s for s in existing if s not in stem_set]
+        if missing:
+            for s in missing:
+                existing[s] = "ware"
+            data[cat_key] = dict(sorted(existing.items(), key=lambda kv: kv[0].lower()))
+            dirty = True
+            ex = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
+            print(L(f"  [LoRA_preview/{prefix}] 不足 {len(missing)} 件を ware で追加 ({ex})",
+                    f"  [LoRA_preview/{prefix}] added {len(missing)} missing as ware ({ex})"))
+        if stale:
+            ex = ", ".join(stale[:3]) + (" …" if len(stale) > 3 else "")
+            print(L(f"  [LoRA_preview/{prefix}] 余剰 {len(stale)} 件 (実体なし。--init-categories で整理可): {ex}",
+                    f"  [LoRA_preview/{prefix}] {len(stale)} stale entries (no file; tidy via --init-categories): {ex}"))
+        total_missing += len(missing)
+        total_stale += len(stale)
+    if dirty:
         with open(LORA_PREVIEW_TOML, "wb") as f:
             tomli_w.dump(data, f)
-        ex = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
-        print(L(f"  [LoRA_preview] 不足 {len(missing)} 件を ware で追加 ({ex})",
-                f"  [LoRA_preview] added {len(missing)} missing as ware ({ex})"))
-    if stale:
-        ex = ", ".join(stale[:3]) + (" …" if len(stale) > 3 else "")
-        print(L(f"  [LoRA_preview] 余剰 {len(stale)} 件 (実体なし。--init-categories で整理可): {ex}",
-                f"  [LoRA_preview] {len(stale)} stale entries (no file; tidy via --init-categories): {ex}"))
-    return (len(missing), len(stale))
+    return (total_missing, total_stale)
 
 
 # --------------------------------------------------------------------------- #

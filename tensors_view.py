@@ -269,6 +269,7 @@ _KEY_META = [
 # LoRA_preview.toml (make_previews のカテゴリ/カスタムプロンプト) の読み書き
 # --------------------------------------------------------------------------- #
 PREVIEW_TOML = Path(__file__).resolve().parent / "LoRA_preview.toml"
+PREVIEW_SETTINGS_TOML = Path(__file__).resolve().parent / "preview_settings.toml"
 MAKE_PREVIEWS_PY = Path(__file__).resolve().parent / "make_previews.py"
 DEFAULT_CATEGORIES = ["ware", "doing1", "doing2", "doing3", "doingmob",
                       "object", "part", "view", "place", "artstyle", "unknown"]
@@ -277,51 +278,86 @@ DEFAULT_STEPS = 24
 CATEGORY_STEPS = {"part": 40}
 
 
+def _load_tensors_dirs() -> list[str]:
+    """preview_settings.toml [tensors_dirs] list を読む。失敗時は空。"""
+    import tomllib
+    if not PREVIEW_SETTINGS_TOML.exists():
+        return []
+    try:
+        data = tomllib.loads(PREVIEW_SETTINGS_TOML.read_text(encoding="utf-8"))
+        lst = (data.get("tensors_dirs") or {}).get("list") or []
+        return [str(x) for x in lst if str(x).strip()]
+    except Exception:
+        return []
+
+
+def default_dir() -> Optional[Path]:
+    """--dir 省略時に開くディレクトリ。[tensors_dirs] list の先頭 (実在するもの)。"""
+    root = Path(__file__).resolve().parent
+    for name in _load_tensors_dirs():
+        cand = root / name
+        if cand.exists():
+            return cand.resolve()
+    return None
+
+
 def load_preview_meta() -> tuple[dict, dict, list]:
-    """(stem→category, stem→カスタムprompt, カテゴリ選択肢) を返す。torch 不要。"""
-    cats: dict = {}
-    prompts: dict = {}
+    """(cats_by_ver, prompts_by_ver, カテゴリ選択肢) を返す。torch 不要。
+    cats_by_ver / prompts_by_ver は {"sd15": {stem→...}, "sdxl": {stem→...}}。"""
+    import tomllib
+    cats_by_ver: dict = {"sd15": {}, "sdxl": {}}
+    prompts_by_ver: dict = {"sd15": {}, "sdxl": {}}
     choices = list(DEFAULT_CATEGORIES)
-    if PREVIEW_TOML.exists():
+    # 選択肢は preview_template.toml の [LoRA_preview_template] キーから (ハードコード吸収)
+    if PREVIEW_SETTINGS_TOML.exists():
         try:
-            import tomllib
-            data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
-            cats = {str(k): str(v) for k, v in (data.get("categories") or {}).items()}
-            prompts = {str(k): str(v) for k, v in (data.get("prompts") or {}).items()}
-            tkeys = list((data.get("templates") or {}).keys())
+            td = tomllib.loads(PREVIEW_SETTINGS_TOML.read_text(encoding="utf-8"))
+            tkeys = list((td.get("LoRA_preview_template") or {}).keys())
             if tkeys:
                 choices = tkeys + [c for c in DEFAULT_CATEGORIES if c not in tkeys]
         except Exception:
             pass
-    return cats, prompts, choices
+    if PREVIEW_TOML.exists():
+        try:
+            data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
+            cats_by_ver["sd15"] = {str(k): str(v) for k, v in (data.get("SD15_categories") or {}).items()}
+            cats_by_ver["sdxl"] = {str(k): str(v) for k, v in (data.get("SDXL_categories") or {}).items()}
+            prompts_by_ver["sd15"] = {str(k): str(v) for k, v in (data.get("SD15_prompts") or {}).items()}
+            prompts_by_ver["sdxl"] = {str(k): str(v) for k, v in (data.get("SDXL_prompts") or {}).items()}
+        except Exception:
+            pass
+    return cats_by_ver, prompts_by_ver, choices
 
 
-def save_preview_meta(stem: str, category: str, custom_prompt: str) -> None:
-    """LoRA_preview.toml の categories[stem] / prompts[stem] を更新 (templates 等は保持)。"""
+def save_preview_meta(stem: str, version: str, category: str, custom_prompt: str) -> None:
+    """LoRA_preview.toml の {SD15,SDXL}_{categories,prompts}[stem] を更新。"""
     import tomllib
     import tomli_w
+    if version not in ("sd15", "sdxl"):
+        raise ValueError(f"unknown version: {version}")
     data: dict = {}
     if PREVIEW_TOML.exists():
         try:
             data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    cats = dict(data.get("categories") or {})
-    prompts = dict(data.get("prompts") or {})
+    prefix = "SD15" if version == "sd15" else "SDXL"
+    cats = dict(data.get(f"{prefix}_categories") or {})
+    prompts = dict(data.get(f"{prefix}_prompts") or {})
     cats[stem] = category
     cp = custom_prompt.strip()
     if cp:
         prompts[stem] = cp
     else:
         prompts.pop(stem, None)
-    data["categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
-    data["prompts"] = dict(sorted(prompts.items(), key=lambda kv: kv[0].lower()))
+    data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    data[f"{prefix}_prompts"] = dict(sorted(prompts.items(), key=lambda kv: kv[0].lower()))
     with open(PREVIEW_TOML, "wb") as f:
         tomli_w.dump(data, f)
 
 
-def set_preview_categories(stems: list[str], category: str) -> None:
-    """複数 LoRA の categories を一括設定 (prompts/templates は保持、1 回で書き込み)。"""
+def set_preview_categories(stems_by_ver: dict, category: str) -> None:
+    """version → [stem] の辞書を受け取り、両 section を 1 度の書き込みで一括更新。"""
     import tomllib
     import tomli_w
     data: dict = {}
@@ -330,12 +366,29 @@ def set_preview_categories(stems: list[str], category: str) -> None:
             data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    cats = dict(data.get("categories") or {})
-    for s in stems:
-        cats[s] = category
-    data["categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    for ver, stems in stems_by_ver.items():
+        if not stems or ver not in ("sd15", "sdxl"):
+            continue
+        prefix = "SD15" if ver == "sd15" else "SDXL"
+        cats = dict(data.get(f"{prefix}_categories") or {})
+        for s in stems:
+            cats[s] = category
+        data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
     with open(PREVIEW_TOML, "wb") as f:
         tomli_w.dump(data, f)
+
+
+def _entry_version(entry) -> str:
+    """Entry の version を判定 (entry.base が sd15/sdxl ならそれを、不明なら親dirで補完、最終的に sd15)。"""
+    base = getattr(entry, "base", "")
+    if base in ("sd15", "sdxl"):
+        return base
+    parent = entry.path.parent.name
+    if parent.startswith("3_"):
+        return "sd15"
+    if parent.startswith("4_"):
+        return "sdxl"
+    return "sd15"
 
 
 # --------------------------------------------------------------------------- #
@@ -459,7 +512,14 @@ def run_gui(directory: Path) -> None:
             ttk.Checkbutton(bar, text=L("降順", "Desc"), variable=self.desc_var,
                             command=self._populate).pack(side="left", padx=(0, 12))
 
-            ttk.Button(bar, text=L("再読込", "Reload"), command=self._reload).pack(side="left")
+            # ディレクトリ選択 (project root 直下の安全な候補のみ)
+            ttk.Label(bar, text=L("ディレクトリ:", "Dir:")).pack(side="left")
+            self.dir_var = tk.StringVar(value=self._dir_label(self.directory))
+            dir_cb = ttk.Combobox(bar, textvariable=self.dir_var, width=22, state="readonly",
+                                  values=self._dir_choices())
+            dir_cb.pack(side="left", padx=(4, 12))
+            dir_cb.bind("<<ComboboxSelected>>", lambda *_: self._on_dir_change())
+
             self.thumb_btn = ttk.Button(bar, text=L("サムネイル生成", "Gen thumbs"),
                                         command=self._batch_missing)
             self.thumb_btn.pack(side="left", padx=(8, 0))
@@ -485,7 +545,7 @@ def run_gui(directory: Path) -> None:
             hsb.grid(row=1, column=0, sticky="ew")
             left.rowconfigure(0, weight=1)
             left.columnconfigure(0, weight=1)
-            for kind, color in (("broken", "#b00020"), ("lora", "#1565c0"),
+            for kind, color in (("broken", "#b00020"),
                                 ("embedding", "#2e7d32"), ("controlnet", "#8500b0")):
                 self.tree.tag_configure(kind, foreground=color)
             self.tree.bind("<<TreeviewSelect>>", self._on_select)
@@ -495,8 +555,9 @@ def run_gui(directory: Path) -> None:
             paned.add(right, weight=2)
             self.preview_lbl = tk.Label(right, background="#2a2a2a",
                                         text=L("(プレビューなし)", "(no preview)"),
-                                        fg="#888888", height=4)
+                                        fg="#888888", height=4, cursor="hand2")
             self.preview_lbl.pack(side="top", fill="x")
+            self.preview_lbl.bind("<Button-1>", lambda *_: self._show_full_preview())
 
             # プレビュー設定エディタ (LoRA: category/カスタムプロンプト編集 + その場で再生成)
             ed = ttk.LabelFrame(right, text=L("プレビュー設定", "Preview settings"), padding=6)
@@ -670,7 +731,7 @@ def run_gui(directory: Path) -> None:
 
             # category: 単一 lora=その値 / 複数 lora=共通なら表示・違えば空
             if loras:
-                cset = {self.pv_cats.get(e.path.stem, "ware") for e in loras}
+                cset = {self.pv_cats.get(_entry_version(e), {}).get(e.path.stem, "ware") for e in loras}
                 self.cat_var.set(next(iter(cset)) if len(cset) == 1 else "")
             else:
                 self.cat_var.set("")
@@ -679,7 +740,8 @@ def run_gui(directory: Path) -> None:
             self.prompt_text.delete("1.0", "end")
             single_lora = (n == 1 and bool(loras))
             if single_lora:
-                self.prompt_text.insert("1.0", self.pv_prompts.get(loras[0].path.stem, ""))
+                v = _entry_version(loras[0])
+                self.prompt_text.insert("1.0", self.pv_prompts.get(v, {}).get(loras[0].path.stem, ""))
             self.cat_cb.configure(state="readonly" if loras else "disabled")
             self.prompt_text.configure(state="normal" if single_lora else "disabled")
             self.save_btn.configure(state="normal" if loras else "disabled")
@@ -704,23 +766,29 @@ def run_gui(directory: Path) -> None:
             cat = self.cat_var.get() or "ware"
             try:
                 if len(self.selected_entries) == 1:
-                    stem = loras[0].path.stem
+                    e = loras[0]
+                    stem = e.path.stem
+                    ver = _entry_version(e)
                     cp = self.prompt_text.get("1.0", "end").strip()
-                    save_preview_meta(stem, cat, cp)
-                    self.pv_cats[stem] = cat
+                    save_preview_meta(stem, ver, cat, cp)
+                    self.pv_cats.setdefault(ver, {})[stem] = cat
                     if cp:
-                        self.pv_prompts[stem] = cp
+                        self.pv_prompts.setdefault(ver, {})[stem] = cp
                     else:
-                        self.pv_prompts.pop(stem, None)
-                    self.editor_status.set(L(f"保存: {cat}" + ("＋custom" if cp else ""),
-                                             f"saved: {cat}" + (" +custom" if cp else "")))
+                        self.pv_prompts.get(ver, {}).pop(stem, None)
+                    self.editor_status.set(L(f"保存 [{ver}]: {cat}" + ("＋custom" if cp else ""),
+                                             f"saved [{ver}]: {cat}" + (" +custom" if cp else "")))
                 else:
-                    stems = [e.path.stem for e in loras]
-                    set_preview_categories(stems, cat)
-                    for s in stems:
-                        self.pv_cats[s] = cat
-                    self.editor_status.set(L(f"{len(stems)} 件を {cat} に設定",
-                                             f"set {len(stems)} to {cat}"))
+                    stems_by_ver: dict = {}
+                    for e in loras:
+                        stems_by_ver.setdefault(_entry_version(e), []).append(e.path.stem)
+                    set_preview_categories(stems_by_ver, cat)
+                    for ver, stems in stems_by_ver.items():
+                        for s in stems:
+                            self.pv_cats.setdefault(ver, {})[s] = cat
+                    total = sum(len(v) for v in stems_by_ver.values())
+                    self.editor_status.set(L(f"{total} 件を {cat} に設定",
+                                             f"set {total} to {cat}"))
             except Exception as ex:
                 self.editor_status.set(L(f"保存失敗: {ex}", f"save failed: {ex}"))
 
@@ -920,7 +988,77 @@ def run_gui(directory: Path) -> None:
             self.status_var.set(L("読み込み中…", "Loading…"))
             self.q = queue.Queue()
             self._populate()
+            self.title(L(f"テンソル情報ビューア — {self.directory}",
+                         f"Tensor Info Viewer — {self.directory}"))
             threading.Thread(target=self._scan_worker, daemon=True).start()
+
+        def _project_root(self) -> Path:
+            return Path(__file__).resolve().parent
+
+        def _dir_choices(self) -> list[str]:
+            """preview_settings.toml [tensors_dirs] list を候補に。--dir で指定した dir
+            (候補外でも) は先頭に足して呼び出し履歴を残す。"""
+            out = [d for d in _load_tensors_dirs() if (self._project_root() / d).exists()]
+            cur = self._dir_label(self.directory)
+            if cur not in out:
+                out.insert(0, cur)
+            return out
+
+        def _dir_label(self, p: Path) -> str:
+            try:
+                rel = p.resolve().relative_to(self._project_root())
+                return str(rel).replace("\\", "/")
+            except Exception:
+                return str(p)
+
+        def _on_dir_change(self) -> None:
+            label = self.dir_var.get()
+            new_dir = (self._project_root() / label).resolve()
+            if not new_dir.exists() or new_dir == self.directory:
+                return
+            self.directory = new_dir
+            self._reload()
+
+        def _show_full_preview(self) -> None:
+            """preview_lbl クリック時に現在エントリのサイドカー (または埋め込みサムネ) をフルビュー表示。"""
+            e = self.selected
+            if e is None:
+                return
+            try:
+                from PIL import Image, ImageTk
+            except Exception:
+                return
+            im: Optional["Image.Image"] = None
+            if e.preview_path and e.preview_path.exists():
+                try:
+                    im = Image.open(e.preview_path)
+                except Exception:
+                    im = None
+            if im is None:
+                uri = find_thumb_uri(e.meta) if e.meta else None
+                if uri:
+                    try:
+                        import base64, io
+                        b64 = uri.split(",", 1)[-1]
+                        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+                    except Exception:
+                        im = None
+            if im is None:
+                return
+            # 画面サイズに合わせて等倍だが必要なら縮小
+            top = tk.Toplevel(self)
+            top.title(e.path.name)
+            sw, sh = self.winfo_screenwidth() - 80, self.winfo_screenheight() - 120
+            w, h = im.size
+            scale = min(1.0, sw / w, sh / h)
+            if scale < 1.0:
+                im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(im)
+            lbl = tk.Label(top, image=photo, cursor="hand2")
+            lbl.image = photo   # type: ignore[attr-defined]
+            lbl.pack()
+            lbl.bind("<Button-1>", lambda *_: top.destroy())
+            top.bind("<Escape>", lambda *_: top.destroy())
 
     TensorViewApp().mainloop()
 
@@ -932,13 +1070,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=L("safetensors のメタ情報を一覧するビューア (Tkinter)",
                       "Metadata viewer for safetensors files (Tkinter)"))
-    ap.add_argument("--dir", type=str, required=True,
-                    help=L("走査するディレクトリ (再帰)", "directory to scan (recursive)"))
+    ap.add_argument("--dir", type=str, default=None,
+                    help=L("走査するディレクトリ (再帰)。省略時は preview_settings.toml [tensors_dirs] list の先頭",
+                           "directory to scan (recursive). default = first entry of preview_settings.toml [tensors_dirs] list"))
     ap.add_argument("--list", action="store_true",
                     help=L("GUI を出さず一覧を標準出力", "print a list without GUI"))
     args = ap.parse_args()
 
-    directory = Path(args.dir)
+    if args.dir:
+        directory = Path(args.dir)
+    else:
+        directory = default_dir()
+        if directory is None:
+            raise SystemExit(L("--dir 省略時の既定が preview_settings.toml [tensors_dirs] に見つかりません",
+                               "no default in preview_settings.toml [tensors_dirs]; pass --dir"))
     if not directory.is_dir():
         raise SystemExit(L(f"ディレクトリが見つかりません: {directory}",
                            f"Directory not found: {directory}"))
