@@ -464,12 +464,8 @@ def build_workflow_txt2img(
     adetailer_face_model: str = "bbox/face_yolov8n.pt",
     adetailer_hand_model: Optional[str] = "bbox/hand_yolov8n.pt",
     adetailer_person_model: Optional[str] = "segm/person_yolov8n-seg.pt",
-    adetailer_breast_model: Optional[str] = "bbox/female-breast-v4.0-fantasy.pt",
-    adetailer_nipples_model: Optional[str] = "bbox/nipples_yolov8s.pt",
-    adetailer_pussy_model: Optional[str] = "bbox/pussy.pt",
     adetailer_denoise: float = 0.5,
     adetailer_person_denoise: float = 0.3,
-    adetailer_part_denoise: float = 0.4,
     adetailer_steps: int = 30,
 ) -> dict:
     """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
@@ -689,32 +685,6 @@ def build_workflow_txt2img(
             }
             final_image_ref = ["23", 0]
 
-        # (26+) NSFW 部位 detector (breast → nipples → pussy の順)。
-        # bbox 検出なので標準 guide_size、denoise 低めで構造維持しつつディテール付与。
-        # 検出対象が画像に無ければ FaceDetailer は素通しするので SFW 画像でも安全。
-        part_models = [
-            (adetailer_breast_model,  4),
-            (adetailer_nipples_model, 5),
-            (adetailer_pussy_model,   6),
-        ]
-        next_id = 26
-        for part_model, seed_off in part_models:
-            if not part_model:
-                continue
-            det_id, dtl_id = str(next_id), str(next_id + 1)
-            workflow[det_id] = {
-                "class_type": "UltralyticsDetectorProvider",
-                "inputs": {"model_name": part_model},
-            }
-            workflow[dtl_id] = {
-                "class_type": "FaceDetailer",
-                "inputs": _facedetailer_inputs(
-                    final_image_ref, [det_id, 0], (seed + seed_off) & 0xFFFFFFFF,
-                    denoise=adetailer_part_denoise,
-                ),
-            }
-            final_image_ref = [dtl_id, 0]
-            next_id += 2
 
     workflow["7"] = {
         "class_type": "SaveImage",
@@ -1581,24 +1551,12 @@ def main() -> None:
                            "足/脚の奇形補正に使用、denoise を低めで構造維持",
                            "ADetailer full-body detection model (empty string to disable, default person_yolov8n-seg). "
                            "Used to correct leg/foot artifacts; lower denoise to preserve structure"))
-    ap.add_argument("--adetailer-breast-model", type=str, default="bbox/female-breast-v4.0-fantasy.pt",
-                    help=L("ADetailer 胸部検出 model (空文字で OFF、既定 female-breast-v4.0-fantasy)。検出時のみ inpaint",
-                           "ADetailer breast detection model (empty string to disable, default female-breast-v4.0-fantasy). Inpaints only when detected"))
-    ap.add_argument("--adetailer-nipples-model", type=str, default="bbox/nipples_yolov8s.pt",
-                    help=L("ADetailer 乳首検出 model (空文字で OFF、既定 nipples_yolov8s)",
-                           "ADetailer nipples detection model (empty string to disable, default nipples_yolov8s)"))
-    ap.add_argument("--adetailer-pussy-model", type=str, default="bbox/pussy.pt",
-                    help=L("ADetailer 陰部検出 model (空文字で OFF、既定 pussy)",
-                           "ADetailer genitalia detection model (empty string to disable, default pussy)"))
     ap.add_argument("--adetailer-denoise", type=float, default=0.5,
                     help=L("ADetailer (face/hand) inpaint strength (既定 0.5)",
                            "ADetailer (face/hand) inpaint strength (default 0.5)"))
     ap.add_argument("--adetailer-person-denoise", type=float, default=0.3,
                     help=L("ADetailer person inpaint strength (既定 0.3、低めで構造維持)",
                            "ADetailer person inpaint strength (default 0.3, lower to preserve structure)"))
-    ap.add_argument("--adetailer-part-denoise", type=float, default=0.4,
-                    help=L("NSFW 部位 ADetailer (breast/nipples/pussy) の denoise (既定 0.4、構造維持しつつディテール付与)",
-                           "NSFW body-part ADetailer (breast/nipples/pussy) denoise (default 0.4, preserves structure while adding detail)"))
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help=L("ADetailer 各 detected region のステップ数 (既定 30)",
                            "ADetailer inference steps per detected region (default 30)"))
@@ -1743,14 +1701,10 @@ def main() -> None:
 
     # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
     face_model = person_model = hand_model = None
-    breast_model = nipples_model = pussy_model = None
     if args.adetailer:
         face_model    = ensure_adetailer_model(args.adetailer_face_model)
         hand_model    = ensure_adetailer_model(args.adetailer_hand_model or None)
         person_model  = ensure_adetailer_model(args.adetailer_person_model or None)
-        breast_model  = ensure_adetailer_model(args.adetailer_breast_model or None)
-        nipples_model = ensure_adetailer_model(args.adetailer_nipples_model or None)
-        pussy_model   = ensure_adetailer_model(args.adetailer_pussy_model or None)
         if not face_model:
             print(L("  [adetailer][warn] face model が無く DL も不可 → ADetailer 全体を OFF",
                     "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
@@ -2020,12 +1974,8 @@ def main() -> None:
                 adetailer_face_model=face_model,
                 adetailer_hand_model=hand_model,
                 adetailer_person_model=person_model,
-                adetailer_breast_model=breast_model,
-                adetailer_nipples_model=nipples_model,
-                adetailer_pussy_model=pussy_model,
                 adetailer_denoise=args.adetailer_denoise,
                 adetailer_person_denoise=args.adetailer_person_denoise,
-                adetailer_part_denoise=args.adetailer_part_denoise,
                 adetailer_steps=args.adetailer_steps,
             )
             if args.adetailer:
@@ -2034,10 +1984,6 @@ def main() -> None:
                     parts.append(f"hand={hand_model}")
                 if person_model:
                     parts.append(f"person={person_model}@{args.adetailer_person_denoise}")
-                part_detectors = [m for m in (breast_model, nipples_model, pussy_model) if m]
-                if part_detectors:
-                    short = [m.split("/")[-1] for m in part_detectors]
-                    parts.append(f"parts=[{', '.join(short)}]@{args.adetailer_part_denoise}")
                 print(f"  ADetailer: {', '.join(parts)}"
                       f" (denoise={args.adetailer_denoise}, steps={args.adetailer_steps})")
             if upscale_model_name:
@@ -2071,10 +2017,6 @@ def main() -> None:
                                      img_info.get("subfolder", ""),
                                      img_info.get("type", "output"))
 
-            part_tags = [name for name, m in (("breast", breast_model),
-                                              ("nipples", nipples_model),
-                                              ("pussy", pussy_model))
-                         if m and args.adetailer]
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
             out_path = GENERATED_DIR / f"{ts}.png"
             save_with_a1111_metadata(
@@ -2092,7 +2034,6 @@ def main() -> None:
                 pose_source=pose_png.name if pose_png else None,
                 adetailer=args.adetailer,
                 adetailer_person=bool(person_model) and args.adetailer,
-                adetailer_parts=part_tags,
                 pipeline=pipeline_label,
                 draft_checkpoint=draft_checkpoint_meta,
                 draft_loras=draft_loras_meta,
@@ -2128,8 +2069,7 @@ def main() -> None:
                         pose_source=pose_png.name if pose_png else None,
                         adetailer=args.adetailer,
                         adetailer_person=bool(person_model) and args.adetailer,
-                        adetailer_parts=part_tags,
-                        pipeline=pipeline_label,
+                                pipeline=pipeline_label,
                         draft_checkpoint=draft_checkpoint_meta,
                         draft_loras=draft_loras_meta,
                     )

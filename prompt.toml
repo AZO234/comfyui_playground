@@ -35,10 +35,7 @@
 # 1 つを均等ランダム抽選
 who = [
     # plane
-    ["**a girl**", false, false, false, false, "girl"],
-    ["**a boy**", false, false, false, false, "boy"],
-    ["**2 girls**", false, false, false, true, "girl"],
-    ["**2 boys**", false, false, false, true, "boy"],
+    ["**1-2 ladies**", false, false, false, true, ""],
 ]
 
 # 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
@@ -47,10 +44,8 @@ who = [
 # - その他 → "wearing {clothing}" を 1 句として追加
 # 1 つを重み抽選
 wearing = [
-    ["red shirt", 30, "suite"],
-    ["yellow shirt", 30, "suite"],
-    ["blue pants", 30, "suite"],
-    ["green pants", 30, "suite"],
+    ["nothing", 30, "naked"],
+    ["dress", 50, "dress"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
@@ -60,9 +55,6 @@ wearing = [
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
     ["nothing", 50, ""],
-    ["ear ring", 5, "jewel"],
-    ["with dog", 5, "dog"],
-    ["with cat", 5, "cat"],
 ]
 
 # 動作: [motion, weight] または [motion, weight, lora_keywords]
@@ -78,22 +70,15 @@ motion = [
 # at 場所: 1 つを均等ランダム抽選、"at {place}" 形式
 at = [
     "room",
-    "subway station",
-    "beach",
-    "on cauch",
-	"pool side",
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式
 lighting = [
     "bright lighting",
-    "color lighting",
-    "day lighting",
-    "white lighting",
 ]
 
 # 必ず prompt 末尾に付加
 positive_always = "***natural color***"
 
 # 必ず negative_prompt の本体になる (build_prompt は negative も返す)
-negative_always = "***union body, fusion body, synthesis body, low color, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs***"
+negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated"
