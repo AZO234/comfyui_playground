@@ -39,6 +39,7 @@ pip install -r requirements.txt
 $ cd ~
 $ git clone https://github.com/AZO234/comfyui_playground
 $ python -m venv .venv
+$ source .venv/bin/activate
 # PyTorch を環境に合わせて先に入れる（いずれか）
 #$ pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
 $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
@@ -404,6 +405,40 @@ python generate.py --dump-only --version sdxl
 ```
 
 種別は `sdxl_single` / `sd15_single` / `chain_clean` / `draft_sd15` / `refine`。`workflow_dump/` は `.gitignore` 済み。
+
+### テンソル情報ビューア tensors_view.py
+
+```
+python tensors_view.py [--dir <directory>] [--list]
+```
+
+`safetensors` のヘッダを生読みしてメタ情報・テンソル数・dtype・サイズを一覧表示する Tkinter 製のビューア。torch 非依存（ヘッダのみ走査）。
+
+- `--dir` を省略すると `preview_settings.toml` の `[tensors_dirs].list` の先頭ディレクトリを開く。
+- ツールバーのディレクトリ選択コンボで `[tensors_dirs].list` の候補を切り替えて即再読込。
+- 検索・種別/Base フィルタ・並べ替えに対応。検索の「メタ込み」でメタデータ本文も対象になる。
+- サイドカープレビュー（`<name>.preview.png`、`make_previews.py` が生成）があれば右上に表示。プレビュー画像をクリックすると原寸ビューが開く（クリック / Esc で閉じる）。
+- LoRA 行を選ぶと右の「プレビュー設定」エディタでカテゴリ（`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown` …）とカスタムプロンプトを編集できる。複数行選択で一括カテゴリ設定も可能。SD15 / SDXL の振り分けは行ごとに自動判定。
+- 「再生成」で `make_previews.py --files` をサブプロセスで呼び、選択したテンソルだけサイドカーを焼き直す。
+- 「サムネイル生成」でサイドカー未生成のテンソルを一括で焼く。
+- `--list` を付けると GUI を起動せず、ターミナルに一覧を出力する。
+
+#### 設定ファイル preview_settings.toml
+
+ビューア / `make_previews.py` の共有設定。
+
+- `[tensors_dirs]` ： ビューアが切り替える候補ディレクトリの順序付きリスト（`list = [...]`）。先頭が `--dir` 省略時の既定。
+- `[LoRA_preview_template]` ： LoRA プレビューのカテゴリごとの最小プロンプト雛形。
+- `[checkpoint_preview_template]` ： checkpoint プレビューの雛形（`default` キーが汎用、`pony` などの family キーを足すと family 別に切替）。
+
+#### サイドカー実体 LoRA_preview.toml
+
+LoRA ごとのカテゴリとカスタムプロンプトは SD15 / SDXL に分けて格納される（同名 stem の衝突を避けるため）。
+
+- `[SD15_categories]` / `[SDXL_categories]` ： `stem = "<category>"`
+- `[SD15_prompts]` / `[SDXL_prompts]` ： `stem = "<custom positive>"`（書かれていない LoRA は category の雛形のみで焼かれる）
+
+`tensors.py` の起動時監査が新規 LoRA を `ware` で自動追記、実体の無い余剰エントリは警告で表示する（手編集の category を守るため自動削除はしない）。完全に整理したいときは `python make_previews.py --init-categories` を実行する。
 
 ### LoRA選択確率確認 lora_chance_ui.py
 

@@ -42,6 +42,7 @@ pip install -r requirements.txt
 $ cd ~
 $ git clone https://github.com/AZO234/comfyui_playground
 $ python -m venv .venv
+$ source .venv/bin/activate
 # Install PyTorch matching your environment first (pick one)
 #$ pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
 $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
@@ -406,6 +407,40 @@ python generate.py --dump-only --version sdxl
 ```
 
 Kinds are `sdxl_single` / `sd15_single` / `chain_clean` / `draft_sd15` / `refine`. `workflow_dump/` is gitignored.
+
+### Tensor Info Viewer: tensors_view.py
+
+```
+python tensors_view.py [--dir <directory>] [--list]
+```
+
+A Tkinter viewer that reads `safetensors` headers raw and lists metadata, tensor counts, dtypes, and file size. No torch dependency (header scanning only).
+
+- When `--dir` is omitted, the first directory in `[tensors_dirs].list` of `preview_settings.toml` is opened.
+- The directory combo on the toolbar switches between the candidates from `[tensors_dirs].list` and reloads immediately.
+- Search / kind / base filters and sorting are available. The "+meta" toggle extends search to metadata text.
+- If a sidecar preview (`<name>.preview.png`, produced by `make_previews.py`) exists, it is shown in the top-right pane. Click the preview to open a full-size view (click or Esc to close).
+- Selecting a LoRA row opens the "Preview settings" editor on the right: edit the category (`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown`, ...) and an optional custom prompt. Multi-selection batch-sets the category. SD15 vs. SDXL routing is detected per row automatically.
+- "Regenerate" launches `make_previews.py --files` in a subprocess to re-render sidecars only for the selected tensors.
+- "Gen thumbs" batch-renders sidecars for every tensor that does not yet have one.
+- Pass `--list` to skip the GUI and print the listing to the terminal instead.
+
+#### Settings file: preview_settings.toml
+
+Shared between the viewer and `make_previews.py`.
+
+- `[tensors_dirs]` : An ordered list (`list = [...]`) of candidate directories the viewer switches between. The first entry is the default when `--dir` is omitted.
+- `[LoRA_preview_template]` : The minimal prompt scaffold per LoRA category.
+- `[checkpoint_preview_template]` : Scaffold for checkpoint previews (`default` is the generic key; add `pony` and other family keys to switch per family).
+
+#### Sidecar metadata: LoRA_preview.toml
+
+Per-LoRA category and custom-prompt overrides, split between SD15 and SDXL (so that stems that collide between the two versions stay disambiguated):
+
+- `[SD15_categories]` / `[SDXL_categories]` : `stem = "<category>"`
+- `[SD15_prompts]` / `[SDXL_prompts]` : `stem = "<custom positive>"` (LoRAs without an entry are rendered with the category scaffold alone)
+
+The audit performed at `tensors.py` startup auto-appends new LoRAs as `ware` and warns about stale entries whose source file no longer exists (manual category edits are preserved — nothing is deleted automatically). Run `python make_previews.py --init-categories` to fully reconcile the file.
 
 ### LoRA Selection Probability: lora_chance_ui.py
 
