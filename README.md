@@ -55,7 +55,8 @@ $ pip install -r requirements.txt
 - `1_0_prompts` : Place PNG images (with embedded metadata) used as prompts
 - `2_0_tensors` : Drop unclassified tensors here (intake tray)
 - `2_1_errortensors` : Invalid / broken / duplicate tensors
-- `2_2_lowtensor` : Manual quarantine for tensors you judge bad by eye (no color, buggy output, etc.) — excluded from both scanning and generation
+- `2_2_lowtensors` : Manual quarantine for tensors you judge bad by eye (no color, buggy output, etc.) — excluded from both scanning and generation
+- `2_3_hightensors` : Manual quarantine for tensors out of scope — different architecture (AuraFlow / Flux / SD3 etc.) or simply too heavy for the current SDXL/SD15 pipeline — excluded from both scanning and generation
 - `3_1_SD15_checkpoint` : SD15 checkpoint tensors (rough / high-volume lane)
 - `3_2_SD15_LoRA` : SD15 LoRA tensors
 - `3_3_SD15_Embedding` : SD15 embedding tensors

@@ -254,6 +254,11 @@ def wait_for_completion_ws(prompt_id: str, client_id: str,
                     pbar.close()
                     pbar = None
                     current_node = None
+            elif mtype == "executing":
+                # node=null は全ノード実行完了の合図。execution_success を取り損ねても
+                # (例: 完全キャッシュヒットで step が走らない等) ここで確実に抜ける。
+                if data.get("node") is None and data.get("prompt_id") == prompt_id:
+                    break
             elif mtype == "execution_success":
                 if data.get("prompt_id") == prompt_id:
                     break
@@ -1109,9 +1114,10 @@ def checkpoint_version(path: Path) -> str:
 
 
 def _is_pony_name(stem: str) -> bool:
-    """ファイル名から Pony 系かを推定 (pony / pdxl / pny を含む)。"""
+    """ファイル名から Pony 系かを推定 (pony / pdxl / pny / pxl を含む)。
+    ユーザは収集時に pony/pny/pxl を意図的に付与 (無記載=オリジナル名)。"""
     s = stem.lower()
-    return ("pony" in s) or ("pdxl" in s) or ("pny" in s)
+    return ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s)
 
 
 def checkpoint_is_pony(checkpoint_path: Path, checkpoint_data: dict) -> bool:
@@ -1143,12 +1149,12 @@ def _family_from_name(stem: str) -> str:
     """ファイル名から checkpoint 系統を推定 (checkpoint.toml `family` の初期値)。
     判定不能は "" (ユーザが手で補正する想定)。メタには系統が無いのでファイル名が頼り。"""
     s = stem.lower()
-    if ("pony" in s) or ("pdxl" in s) or ("pny" in s):
-        return "pony"
-    if ("illustrious" in s) or ("ilxl" in s) or ("noob" in s):
-        return "illustrious"
+    if ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s):
+        return "pony"                       # 2.5D-3D 主流 (Pony lineage)
+    if ("ill" in s) or ("noob" in s) or ("nai" in s):
+        return "2d"                         # 2D 純粋 (Illustrious / NoobAI / NAI 系)
     if ("real" in s) or ("photo" in s):
-        return "real"
+        return "real"                       # 実写寄り
     return ""
 
 

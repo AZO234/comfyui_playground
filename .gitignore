@@ -237,8 +237,8 @@ ComfyUI/
 !2_0_tensors/put tensors.txt
 2_1_errortensors/*
 !2_1_errortensors/output error tensors.txt
-2_2_lowtensor/*
-!2_2_lowtensor/put bad tensors here (excluded from generation).txt
+2_2_lowtensors/*
+!2_2_lowtensors/put bad tensors here (excluded from generation).txt
 3_1_SD15_checkpoint/*
 !3_1_SD15_checkpoint/output SD15 checkpoint tensors.txt
 3_2_SD15_LoRA/*

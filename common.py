@@ -925,24 +925,30 @@ def detect_controlnet_version(path: Path) -> str | None:
 
 
 def lora_target_version(path: Path) -> str | None:
-    """LoRA が SD15 / SDXL のどちら向けか推定。判定不能は None。"""
+    """LoRA が SD15 / SDXL のどちら向けか推定。判定不能は None。
+
+    注意: to_k/to_v は self-attn(attn1) と cross-attn(attn2) が混在し、最初に見つけた
+    to_k (self-attn の 320/640/1280 次元) で即断すると SDXL を SD15 と誤判定する。
+    そのため **全 to_k/to_v の lora_down 最終次元を集めてから** 判定する:
+    cross-attn context 次元が 2048=SDXL / 768=SD15。te2/clip_g キーがあれば即 SDXL。
+    """
     try:
         from safetensors import safe_open
         with safe_open(str(path), framework="pt") as f:
             keys = list(f.keys())
-            if any("text_encoder_2" in k or "_te2_" in k or "lora_te2_" in k for k in keys):
+            if any("text_encoder_2" in k or "_te2_" in k or "lora_te2_" in k
+                   or "clip_g" in k.lower() for k in keys):
                 return "sdxl"
+            dims: set[int] = set()
             for k in keys:
-                if k.endswith(("to_k.lora_down.weight", "to_k.lora_A.weight",
-                               "_to_k.lora_down.weight", "_to_k.alpha")):
+                if ("to_k" in k or "to_v" in k) and ("lora_down.weight" in k or "lora_A.weight" in k):
                     t = f.get_tensor(k)
-                    if t.dim() < 2:
-                        continue
-                    inner = t.shape[-1]
-                    if inner >= 1500:
-                        return "sdxl"
-                    if inner >= 600:
-                        return "sd15"
+                    if t.dim() >= 2:
+                        dims.add(int(t.shape[-1]))
+            if any(d >= 1500 for d in dims):   # cross-attn context 2048 → SDXL
+                return "sdxl"
+            if 768 in dims:                     # cross-attn context 768 → SD15
+                return "sd15"
     except Exception:
         return None
     return None

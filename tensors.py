@@ -324,6 +324,8 @@ def check_tensors() -> dict:
 
     # SDXL LoRA の種別表 (subject) を更新 (ユーザ記入分は保持、ヒントは再生成)
     update_sdxl_lora_toml()
+    # LoRA_preview.toml (make_previews のプレビュー用カテゴリ) の過不足を点検・追従
+    audit_lora_preview_toml()
 
     return {
         "checkpoint":      _count(CHECKPOINT_DIR),
@@ -390,6 +392,51 @@ def update_sdxl_lora_toml() -> int:
         lines.append("")
     SDXL_LORA_TOML.write_text("\n".join(lines), encoding="utf-8")
     return len(loras)
+
+
+# --------------------------------------------------------------------------- #
+# LoRA_preview.toml (make_previews のプレビュー用カテゴリ表) の過不足チェック
+# --------------------------------------------------------------------------- #
+LORA_PREVIEW_TOML = ROOT / "LoRA_preview.toml"
+
+
+def audit_lora_preview_toml() -> tuple[int, int]:
+    """LoRA_preview.toml と LoRA 実体 (SD15 3_2 + SDXL 4_2) の過不足を点検する。
+
+    - 不足 (実体はあるが toml に無い LoRA) → category="ware" で自動追加。
+    - 余剰 (toml にあるが実体が無い) → 警告のみ (手編集の category を失わないため削除しない。
+      完全に整理するなら `make_previews.py --init-categories`)。
+    `[templates]` と既存 category 値は保持。同期済みなら無出力。戻り値: (追加数, 余剰数)。
+    """
+    stems = sorted({p.stem for d in (SD15_LORA_DIR, LORA_DIR) if d.exists()
+                    for p in d.glob("*.safetensors")})
+    if not stems:
+        return (0, 0)
+    data: dict = {}
+    if LORA_PREVIEW_TOML.exists():
+        try:
+            data = tomllib.loads(LORA_PREVIEW_TOML.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    existing = dict(data.get("categories") or {})
+    stem_set = set(stems)
+    missing = [s for s in stems if s not in existing]
+    stale = [s for s in existing if s not in stem_set]
+
+    if missing:
+        for s in missing:
+            existing[s] = "ware"
+        data["categories"] = dict(sorted(existing.items(), key=lambda kv: kv[0].lower()))
+        with open(LORA_PREVIEW_TOML, "wb") as f:
+            tomli_w.dump(data, f)
+        ex = ", ".join(missing[:3]) + (" …" if len(missing) > 3 else "")
+        print(L(f"  [LoRA_preview] 不足 {len(missing)} 件を ware で追加 ({ex})",
+                f"  [LoRA_preview] added {len(missing)} missing as ware ({ex})"))
+    if stale:
+        ex = ", ".join(stale[:3]) + (" …" if len(stale) > 3 else "")
+        print(L(f"  [LoRA_preview] 余剰 {len(stale)} 件 (実体なし。--init-categories で整理可): {ex}",
+                f"  [LoRA_preview] {len(stale)} stale entries (no file; tidy via --init-categories): {ex}"))
+    return (len(missing), len(stale))
 
 
 # --------------------------------------------------------------------------- #

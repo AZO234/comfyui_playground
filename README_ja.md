@@ -52,7 +52,8 @@ $ pip install -r requirements.txt
 - `1_0_prompts` ： プロンプトの PNG画像（メタ入り） をユーザが配置する
 - `2_0_tensors` ： 種別不明なテンソルをユーザーが配置する（受入トレー）
 - `2_1_errortensors` ： 不正 / 破損 / 重複テンソル
-- `2_2_lowtensor` ： 発色しない・バグ画になる等、目視でダメと判断したテンソルの手動隔離（scan も生成も対象外）
+- `2_2_lowtensors` ： 発色しない・バグ画になる等、目視でダメと判断したテンソルの手動隔離（scan も生成も対象外）
+- `2_3_hightensors` ： 手に余るテンソルの手動隔離 — 別アーキ（AuraFlow / Flux / SD3 等）や現行 SDXL/SD15 パイプラインで扱えない重量級（scan も生成も対象外）
 - `3_1_SD15_checkpoint` ： SD15 checkpoint テンソル（ラフ / 量産レーン）
 - `3_2_SD15_LoRA` ： SD15 LoRA テンソル
 - `3_3_SD15_Embedding` ： SD15 Embedding テンソル
