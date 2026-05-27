@@ -86,7 +86,16 @@ def load_cache() -> dict:
 
 def save_cache(cache: dict) -> None:
     try:
-        CACHE_FILE.write_text(tomli_w.dumps(cache), encoding="utf-8")
+        # write 直前に再読込し、他プロセス or 手動編集で追加された entry を保護してから書く。
+        # 同じ path キーが両方にあれば in-memory (cache) 優先 = 自プロセスの更新が勝つ。
+        merged: dict = {}
+        if CACHE_FILE.exists():
+            try:
+                merged = tomllib.loads(CACHE_FILE.read_text(encoding="utf-8")) or {}
+            except Exception:
+                merged = {}
+        merged.update(cache)
+        CACHE_FILE.write_text(tomli_w.dumps(merged), encoding="utf-8")
     except Exception as e:
         print(L(f"キャッシュ保存失敗: {e}", f"Cache save failed: {e}"), flush=True)
 

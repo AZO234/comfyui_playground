@@ -1,4 +1,4 @@
-# ComfyUI SDXL Portrait Image Generation Environment
+# ComfyUI Portrait Image Generation Environment
 
 A ComfyUI-based portrait image generation environment.
 
@@ -76,10 +76,10 @@ based on the model architecture detected from each file.
 
 1. Put checkpoint tensors into `2_0_tensors`.
 
-2. Run the tensor-sorting script `tensors.py`.
+2. Run the tensor-sorting script `dist_tensors.py`.
 
 ```
-python tensors.py
+python dist_tensors.py
 ```
 
 3. Generate images.

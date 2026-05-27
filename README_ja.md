@@ -1,4 +1,4 @@
-# ComfyUI SDXL 人物画像生成環境
+# ComfyUI 人物画像生成環境
 
 ComfyUIの人物画像制作環境です。
 
@@ -73,10 +73,10 @@ SD15 (`3_x`) / SDXL (`4_x`) レーンへ自動振り分けする。
 
 1. チェックポイントテンソルを `2_0_tensors` にいれる。
 
-2. テンソル振り分けスクリプト `tensors.py` を実行する。
+2. テンソル振り分けスクリプト `dist_tensors.py` を実行する。
 
 ```
-python tensors.py
+python dist_tensors.py
 ```
 
 3. 画像生成を実行する。
