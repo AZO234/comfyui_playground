@@ -469,7 +469,7 @@ def build_workflow_txt2img(
     adetailer_steps: int = 30,
     hires_fix: bool = False,
     hires_scale: float = 1.5,
-    hires_denoise: float = 0.5,
+    hires_denoise: float = 0.35,
     hires_steps: int = 20,
 ) -> dict:
     """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
@@ -614,17 +614,33 @@ def build_workflow_txt2img(
         "class_type": "VAEDecode",
         "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
     }
-    # Hires Fix: 1段目 latent (node 5) を 1.5× upscale → 2段目 KSampler で refine → VAEDecode。
-    # 最終 image ref を Hires Fix 後の VAEDecode (node 32) に切り替える。
-    # 旧 sd_playground の「512→768 二段」を ComfyUI 版に移植 (memory feedback_hires_fix_confirmed)。
+    # Hires Fix: ImageScale 方式 (旧 sd_playground の diffusers Img2ImgPipeline と同等)。
+    #   1段目 latent (node 5) → VAEDecode (29) → ImageScale lanczos (30)
+    #   → VAEEncode (33) → KSampler 2段目 refine (31) → VAEDecode 最終 (32)
+    # LatentUpscaleBy 方式 (旧実装) は latent 空間の補間誤差を 2段目で増幅し、
+    # タイル/chromatic aberration/色彩破綻を多発した (2026-05-27 実機確認)。
+    # RGB 空間で lanczos 拡大すれば品質劣化が大幅に減る (ただし VAE 2 回追加で時間増)。
     if hires_fix:
+        # target は 8 倍数に丸め (VAEEncode 要件)
+        target_w = max(64, (int(base_w * hires_scale) // 8) * 8)
+        target_h = max(64, (int(base_h * hires_scale) // 8) * 8)
+        workflow["29"] = {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+        }
         workflow["30"] = {
-            "class_type": "LatentUpscaleBy",
+            "class_type": "ImageScale",
             "inputs": {
-                "samples": ["5", 0],
-                "upscale_method": "nearest-exact",
-                "scale_by": float(hires_scale),
+                "image": ["29", 0],
+                "width": target_w,
+                "height": target_h,
+                "upscale_method": "lanczos",
+                "crop": "disabled",
             },
+        }
+        workflow["33"] = {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["30", 0], "vae": ["1", 2]},
         }
         workflow["31"] = {
             "class_type": "KSampler",
@@ -638,7 +654,7 @@ def build_workflow_txt2img(
                 "model": model_ref,
                 "positive": ksampler_positive_ref,
                 "negative": ksampler_negative_ref,
-                "latent_image": ["30", 0],
+                "latent_image": ["33", 0],
             },
         }
         workflow["32"] = {
@@ -1615,9 +1631,9 @@ def main() -> None:
     ap.add_argument("--hires-scale", type=float, default=1.5,
                     help=L("Hires Fix のスケール係数 (既定 1.5、512→768 の比率)",
                            "Hires Fix scale factor (default 1.5, matches 512→768)"))
-    ap.add_argument("--hires-denoise", type=float, default=0.5,
-                    help=L("Hires Fix 2 段目 denoise (既定 0.5)",
-                           "Hires Fix 2nd-pass denoise (default 0.5)"))
+    ap.add_argument("--hires-denoise", type=float, default=0.35,
+                    help=L("Hires Fix 2 段目 denoise (既定 0.35、高いと tile/seamless 化)",
+                           "Hires Fix 2nd-pass denoise (default 0.35; higher values risk tile/seamless artifacts)"))
     ap.add_argument("--hires-steps", type=int, default=20,
                     help=L("Hires Fix 2 段目 step 数 (既定 20)",
                            "Hires Fix 2nd-pass steps (default 20)"))
@@ -2099,12 +2115,15 @@ def main() -> None:
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
             out_path = GENERATED_DIR / f"{ts}.png"
+            # 画像の最終解像度 (Hires Fix on のとき base × scale)。メタ Size はここを書く
+            final_w = int(gen_width * args.hires_scale) if args.hires_fix else gen_width
+            final_h = int(gen_height * args.hires_scale) if args.hires_fix else gen_height
             save_with_a1111_metadata(
                 img_bytes, out_path,
                 positive=positive_augmented, negative=negative_augmented, seed=seed,
                 steps=use_steps, cfg=args.cfg_scale,
                 sampler=args.sampler, scheduler=args.scheduler,
-                width=gen_width, height=gen_height,
+                width=final_w, height=final_h,
                 checkpoint=checkpoint_path.name,
                 lora_keywords=lora_keywords,
                 loras=[(p.name, s) for p, s in picked_loras],
@@ -2120,7 +2139,7 @@ def main() -> None:
             )
             elapsed = time.time() - iter_start
             total += 1
-            print(f"  → {out_path.name}  {gen_width}x{gen_height}  ({elapsed:.1f}s)")
+            print(f"  → {out_path.name}  {final_w}x{final_h}  ({elapsed:.1f}s)")
             if is_refine:
                 stop["flag"] = True  # --png refine は 1 枚で終了 (この後の upscale 保存まではやる)
 
@@ -2139,7 +2158,7 @@ def main() -> None:
                         positive=positive_augmented, negative=negative_augmented, seed=seed,
                         steps=use_steps, cfg=args.cfg_scale,
                         sampler=args.sampler, scheduler=args.scheduler,
-                        width=gen_width * 4, height=gen_height * 4,
+                        width=final_w * 4, height=final_h * 4,
                         checkpoint=checkpoint_path.name,
                         lora_keywords=lora_keywords,
                         loras=[(p.name, s) for p, s in picked_loras],

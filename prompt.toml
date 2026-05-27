@@ -48,8 +48,8 @@ who = [
 wearing = [
     ["nothing", 30, "naked"],
     ["lingerie", 20, "lingerie"],
-    ["swimsuit", 10, "swimsuit"],
     ["dress", 10, "dress"],
+    ["swimsuit", 10, "swimsuit"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
@@ -59,9 +59,9 @@ wearing = [
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
     ["nothing", 50, ""],
+    ["jewely", 5, "jewel"],
     ["necklace", 5, "jewel"],
     ["ear piace", 5, "jewel"],
-    ["jewely", 5, "jewel"],
 ]
 
 # 動作: [motion, weight] または [motion, weight, lora_keywords]
@@ -92,7 +92,7 @@ lighting = [
 ]
 
 # 必ず prompt 末尾に付加
-positive_always = "***natural color***"
+positive_always = "natural color"
 
 # 必ず negative_prompt の本体になる (build_prompt は negative も返す)
 negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated"
