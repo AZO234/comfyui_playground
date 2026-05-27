@@ -1893,7 +1893,22 @@ def main() -> None:
                 if args.save_draft:
                     SD15_ROUGH_DIR.mkdir(exist_ok=True)
                     dts = datetime.now().strftime("%Y%m%d%H%M%S")
-                    (SD15_ROUGH_DIR / f"{dts}_draft.png").write_bytes(d_bytes)
+                    draft_path = SD15_ROUGH_DIR / f"{dts}_draft.png"
+                    # ラフ画にも A1111 互換メタを残す (失敗解析・gallery で内容確認しやすく)。
+                    # 解像度は Hires Fix on のとき base × scale が実画像サイズ
+                    d_final_w = int(d_w * args.hires_scale) if args.hires_fix else d_w
+                    d_final_h = int(d_h * args.hires_scale) if args.hires_fix else d_h
+                    save_with_a1111_metadata(
+                        d_bytes, draft_path,
+                        positive=d_pos, negative=d_neg, seed=seed,
+                        steps=d_steps, cfg=args.cfg_scale,
+                        sampler=args.sampler, scheduler=args.scheduler,
+                        width=d_final_w, height=d_final_h,
+                        checkpoint=draft_ckpt.name,
+                        lora_keywords=lora_keywords,
+                        loras=[(p.name, s) for p, s in d_loras],
+                        pipeline="SD15 draft (chain 1st pass)",
+                    )
                     print(L(f"  下書き保存: 3_9_SD15_rough/{dts}_draft.png",
                             f"  draft saved: 3_9_SD15_rough/{dts}_draft.png"))
                 init_image_name = upload_bytes_to_comfyui(d_bytes, f"draft_{seed}.png")
