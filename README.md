@@ -442,6 +442,60 @@ Per-LoRA category and custom-prompt overrides, split between SD15 and SDXL (so t
 
 The audit performed at `tensors.py` startup auto-appends new LoRAs as `ware` and warns about stale entries whose source file no longer exists (manual category edits are preserved — nothing is deleted automatically). Run `python make_previews.py --init-categories` to fully reconcile the file.
 
+### Image Generation GUI: generate_gui.py
+
+```
+python generate_gui.py
+```
+
+A Tkinter-based manual image generation GUI that reuses `generate.py`'s internals. Generates 1–300 images in a batch while streaming results into an inline gallery.
+
+#### Main window
+
+- **Checkpoint**: combobox showing 3_1_SD15_checkpoint and 4_1_SDXL_checkpoint tagged `[SD15] / [SDXL]`. The thumbnail (`<name>.preview.png` sidecar produced by `make_previews.py`) is shown alongside; click for full-size modal
+- **LoRA**: filtered automatically by the checkpoint's version (3_2 or 4_2). Standard Ctrl/Shift-click multi-select (EXTENDED mode). Selected items are echoed as a thumbnail strip below (each thumbnail click opens the full-size modal)
+- **ControlNet / Embedding**: two side-by-side lists. ControlNet is SDXL-only (4_3, single-select). Embedding switches per version (3_3 or 4_4, multi-select). Selected embeddings are auto-prepended to the negative prompt as `embedding:<stem>` (ComfyUI native syntax)
+- **Prompt**: multi-line text area (supports compel emphasis `*word*` / `**word**` / `***word***`)
+- **Count / OpenPose / Settings… button / Generate / Stop**: single control row. "Count" 1-300 = number of images (each iteration gets a fresh random seed). OpenPose is auto-disabled when SD15 is picked (ControlNet 4_3 is SDXL-only)
+- **Gallery** (bottom): thumbnails are appended as each image completes. **Click** opens a full-size modal; **right-click** brings up "Delete" / "Upscale (Anime / Real)"
+- **Mouse wheel**: scrolls the gallery vertically
+
+#### Settings dialog
+
+Opened via "Settings…" on the main window. Values are persisted to `generate_gui.toml` (written on Generate, on dialog close, on app close; loaded at startup).
+
+- **Prompts**: positive / negative (multi-line)
+- **Generation params**: CFG / Steps / Seed (`-1` = random; an integer uses `seed+i` for batch variation) / Width / Height / Sampler (10 options including dpmpp_2m) / Scheduler (6 options including karras) / LoRA total weight (distributed equally across `n`, default 0.8)
+- **Quality boosts**: AD detailer (face / person / hand) / Hires Fix / Hires Scale / Hires Denoise / Hires Steps
+
+#### Upscaling (right-click)
+
+Right-click on a gallery thumbnail → "Upscale (Real-ESRGAN x4)" → choose **Anime (default)** or **Real**. `_upscale_worker` submits a standalone upscale workflow to ComfyUI and saves the result to `5_2_upscaled/<original_name>.png`. The models (`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`) are auto-downloaded by `ensure_upscale_model` from the official xinntao GitHub releases when missing.
+
+#### Auto-prepared dependencies
+
+- `extra_model_paths.yaml` is regenerated (registers the 3_x / 4_x model directories with ComfyUI)
+- The first generation of a session force-restarts ComfyUI (avoids the case where a stale server hasn't loaded the YAML)
+- ADetailer YOLO weights (face / hand / person) are auto-downloaded from HuggingFace
+- Real-ESRGAN upscaling models are auto-downloaded from GitHub releases
+
+### Image Gallery: gallery.py
+
+```
+python gallery.py [--list]
+```
+
+A Tkinter thumbnail gallery for generated PNGs. **Read-only** — no copy / no delete (guards against accidental writes).
+
+- Recursively scans three fixed directories: `3_9_SD15_rough` / `5_1_generated` / `5_2_upscaled`
+- Reads A1111-compatible metadata (parameters chunk) and shows thumbnails + metadata. SD15 / SDXL is color-coded based on the `Pipeline` field (falling back to `Size`)
+- Toggle between Icon view and List view (click column headers to sort; row thumbnail size is adjustable 24–128 px via slider)
+- Search (AND substring across name/model/loras/keywords/positive/pipeline) plus arch filter
+- Right pane: large preview + full params + positive/negative + "Open" (launches the OS image viewer)
+- `--list` prints the metadata list to stdout without the GUI
+
+Delete / copy operations are intentionally absent — use `generate_gui.py`'s right-click gallery menu or your file explorer.
+
 ### LoRA Selection Probability: lora_chance_ui.py
 
 ```

@@ -978,6 +978,47 @@ def _dump_workflow(workflow: dict, kind: str) -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# Upscale モデル (Real-ESRGAN) の自動 DL
+# --------------------------------------------------------------------------- #
+UPSCALE_MODELS_DIR = COMFYUI_DIR / "models" / "upscale_models"
+# 既知の Real-ESRGAN モデル → 公式 GitHub release URL
+_UPSCALE_MODEL_URLS = {
+    "RealESRGAN_x4plus_anime_6B.pth":
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+    "RealESRGAN_x4plus.pth":
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+}
+
+
+def ensure_upscale_model(name: Optional[str]) -> Optional[str]:
+    """upscale_models/<name> が無ければ公式 GitHub release から DL する。
+    成功 / 既存 → name を返す。URL 未登録 / DL 失敗 → None を返し caller がスキップ。"""
+    if not name:
+        return None
+    full = UPSCALE_MODELS_DIR / name
+    if full.is_file():
+        return name
+    url = _UPSCALE_MODEL_URLS.get(name)
+    if not url:
+        print(L(f"  [upscale][warn] {name} の DL URL 未登録 → スキップ",
+                f"  [upscale][warn] no download URL registered for {name} → skipping"), flush=True)
+        return None
+    print(L(f"  [upscale] {name} が無い → {url} から DL 試行...",
+            f"  [upscale] {name} not found → attempting download from {url}..."), flush=True)
+    try:
+        import urllib.request
+        full.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, full)
+        print(L(f"  [upscale] DL 完了 → {full} ({full.stat().st_size // (1024*1024)} MB)",
+                f"  [upscale] download complete → {full} ({full.stat().st_size // (1024*1024)} MB)"), flush=True)
+        return name
+    except Exception as e:
+        print(L(f"  [upscale][warn] {name} の DL 失敗 ({type(e).__name__}: {e}) → スキップ",
+                f"  [upscale][warn] {name} download failed ({type(e).__name__}: {e}) → skipping"), flush=True)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # ADetailer (Ultralytics) モデルの自動 DL
 # --------------------------------------------------------------------------- #
 ULTRALYTICS_DIR = COMFYUI_DIR / "models" / "ultralytics"
@@ -2035,6 +2076,8 @@ def main() -> None:
                 else:
                     style = (entry.get("style") or "").strip().lower()
                     upscale_model_name = _UPSCALE_MODEL_BY_STYLE.get(style, _UPSCALE_MODEL_DEFAULT)
+                # 必要なら HF release から自動 DL。失敗時は None で upscale 段を無効化 (workflow が落ちないように)
+                upscale_model_name = ensure_upscale_model(upscale_model_name)
 
             # この段 (清書/単一パス = checkpoint_path) の系統を確定 (family タグ優先・無ければ名前)
             ckpt_is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)

@@ -31,6 +31,15 @@ python -m venv .venv
 pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # 残りの依存
 pip install -r requirements.txt
+# ComfyUI
+git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI\custom_nodes
+git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack
+git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+cd ../..
+pip install -r ComfyUI\requirements.txt
+pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Pack\requirements.txt
+pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
 ```
 
 ### Linux/macOS
@@ -45,6 +54,15 @@ $ source .venv/bin/activate
 $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # 残りの依存
 $ pip install -r requirements.txt
+# ComfyUI
+$ git clone https://github.com/comfyanonymous/ComfyUI
+$ cd ComfyUI\custom_nodes
+$ git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack
+$ git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+$ cd ../.. 
+$ pip install -r ComfyUI\requirements.txt
+$ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Pack\requirements.txt
+$ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
 ```
 
 ## ディレクトリ構成
@@ -439,6 +457,60 @@ LoRA ごとのカテゴリとカスタムプロンプトは SD15 / SDXL に分�
 - `[SD15_prompts]` / `[SDXL_prompts]` ： `stem = "<custom positive>"`（書かれていない LoRA は category の雛形のみで焼かれる）
 
 `tensors.py` の起動時監査が新規 LoRA を `ware` で自動追記、実体の無い余剰エントリは警告で表示する（手編集の category を守るため自動削除はしない）。完全に整理したいときは `python make_previews.py --init-categories` を実行する。
+
+### 画像生成 GUI generate_gui.py
+
+```
+python generate_gui.py
+```
+
+`generate.py` の中身を流用したマニュアル指定型の画像生成 GUI（Tkinter）。1〜300 枚をまとめて生成しつつ、ギャラリーに即時表示する。
+
+#### メイン画面
+
+- **チェックポイント**：3_1_SD15_checkpoint と 4_1_SDXL_checkpoint を `[SD15] / [SDXL]` タグ付き combobox で選択。サムネ（`<name>.preview.png` サイドカー、`make_previews.py` 生成）を横に表示。クリックで原寸モーダル
+- **LoRA**：チェックポイント版に応じて 3_2 / 4_2 を自動フィルタ。Ctrl/Shift クリックの複数選択（標準 EXTENDED モード）。選択分のサムネを下段に列表示（各サムネクリックで原寸モーダル）
+- **ControlNet / Embedding**：横並び 2 列リスト。ControlNet は SDXL のみ（4_3、単一選択）。Embedding は版で切替（3_3 or 4_4、複数選択）。Embedding は negative プロンプトの先頭に `embedding:<stem>` として自動連結（ComfyUI ネイティブ構文）
+- **プロンプト**：複数行テキストエリア（`*word*` / `**word**` / `***word***` の compel 重み記法対応）
+- **推論数 / OpenPose / 設定… ボタン / 画像生成 / 停止**：1 行コントロール。`推論数 1-300` = 生成枚数（各回 seed ランダム）。SD15 選択時は OpenPose 自動無効化（ControlNet 4_3 は SDXL のみのため）
+- **ギャラリー**（下段）：生成完了するたびにサムネ追加。**クリックで原寸モーダル**、**右クリックメニュー**で「削除」「アップスケール（アニメ / 実写）」
+- **マウスホイール**：ギャラリーを縦スクロール
+
+#### 設定ダイアログ
+
+メイン画面の「設定…」ボタンで開く。値は `generate_gui.toml` に永続化（生成ボタン押下時、ダイアログ閉じ時、アプリ終了時に書き出し、起動時に読み戻し）。
+
+- **プロンプト**：ポジティブ / ネガティブ（複数行）
+- **生成パラメータ**：CFG / Steps / Seed（`-1`=ランダム、整数指定で `seed+i` 連番） / 幅 / 高さ / Sampler（dpmpp_2m など 10 種） / Scheduler（karras など 6 種） / LoRA 合計強度（n 個に均等配分、既定 0.8）
+- **品質補正**：AD 補正（FaceDetailer/PersonDetailer/HandDetailer の有無） / Hires Fix / Hires Scale / Hires Denoise / Hires Steps
+
+#### アップスケール（右クリック）
+
+ギャラリー上で右クリック → 「アップスケール（Real-ESRGAN x4）」→ **アニメ（既定）** または **実写** を選択。`_upscale_worker` が ComfyUI に upscale 専用 workflow を投入し、`5_2_upscaled/<元名>.png` に保存。モデル（`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`）は無ければ公式 GitHub release から `ensure_upscale_model` が自動 DL。
+
+#### 自動化される下準備
+
+- `extra_model_paths.yaml` の自動生成（3_x / 4_x の model dir を ComfyUI に登録）
+- セッション初回は ComfyUI 強制再起動（古いサーバが YAML 未読のままになるのを防ぐ）
+- ADetailer YOLO 重み（face / hand / person）の HF 自動 DL
+- アップスケールモデルの GitHub release 自動 DL
+
+### 画像ギャラリー gallery.py
+
+```
+python gallery.py [--list]
+```
+
+生成済み PNG をサムネイル一覧する Tkinter ビューア。**閲覧専用**（コピー・削除なし、誤操作防止）。
+
+- 固定 3 ディレクトリを再帰走査： `3_9_SD15_rough` / `5_1_generated` / `5_2_upscaled`
+- A1111 互換メタ（parameters chunk）を読んでサムネ + メタ一覧表示。`Pipeline` フィールド優先で SD15 / SDXL を色分け（無ければ Size で補完）
+- アイコン view / リスト view を切替（列ヘッダクリックでソート、行サムネはスライダーで 24-128 px 可変）
+- 検索（name/model/loras/keywords/positive/pipeline の AND 部分一致）+ アーキフィルタ
+- 右パネル：大プレビュー + 全 params + positive/negative + 「開く」（OS ビューアで開く）
+- `--list`：GUI なしでメタ一覧を標準出力
+
+画像の削除・コピーは `generate_gui.py` のギャラリー右クリックメニューかエクスプローラから行う。
 
 ### LoRA選択確率確認 lora_chance_ui.py
 
