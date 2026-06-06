@@ -1578,8 +1578,8 @@ def main() -> None:
                     help=L("--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)",
                            "controlnet_conditioning_scale when --pose is specified (default 1.0, stronger works better for skeleton)"))
     ap.add_argument("--gear", choices=["low", "high"], default="high",
-                    help=L("low=ラフ (steps 30) / high=本番 (steps 100、既定)",
-                           "low=rough (steps 30) / high=production (steps 100, default)"))
+                    help=L("low=ラフ (steps 50) / high=本番 (steps 100、既定)",
+                           "low=rough (steps 50) / high=production (steps 100, default)"))
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
                     help=L("ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)",
                            "ComfyUI device selection (informational in Phase 1; determined at ComfyUI startup)"))
@@ -1739,7 +1739,7 @@ def main() -> None:
         print(L(f"[quality prefix] family=pony の checkpoint にのみ Pony score を自動前置",
                 f"[quality prefix] auto-prepending Pony score only for family=pony checkpoints"))
 
-    steps = {"low": 30, "high": 50}[args.gear]
+    steps = {"low": 50, "high": 100}[args.gear]
 
     # 入力ソースから mode を確定 (UX): --png=画質アップ refine / --png-sentence=PNG文章生成 / --sentence=文章
     #   --png は最優先 (refine)。--png-sentence は png(文章) だが --prompt original 明示は尊重。

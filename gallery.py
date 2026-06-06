@@ -14,8 +14,9 @@ SD15/SDXL の判定は parameters の `Pipeline` フィールド優先 + `Size` 
 UI 文字列は i18n の L() で英/日切替 (PLAYGROUND_LANG / OS ロケール)。
 
 使い方:
-    python gallery.py              # GUI ビューアを起動
-    python gallery.py --list       # GUI なしでメタ一覧を標準出力
+    python gallery.py                      # GUI ビューアを起動 (固定 3 dir)
+    python gallery.py --list               # GUI なしでメタ一覧を標準出力
+    python gallery.py --dir PATH [PATH...] # 任意のディレクトリを走査対象に差し替え
 """
 from __future__ import annotations
 
@@ -43,7 +44,8 @@ except (AttributeError, OSError):
 
 ROOT = Path(__file__).resolve().parent
 
-# 閲覧対象の固定ディレクトリ (この 3 つを再帰走査して PNG を集める)
+# 閲覧対象の既定ディレクトリ (この 3 つを再帰走査して PNG を集める)
+# `--dir PATH [PATH...]` 指定時はこの既定が差し替えられる (main() 参照)
 VIEW_DIRS = [
     ROOT / "3_9_SD15_rough",
     ROOT / "5_1_generated",
@@ -665,12 +667,26 @@ def main() -> None:
                       "Thumbnail gallery viewer for generated PNGs (Tkinter, read-only)"))
     ap.add_argument("--list", action="store_true",
                     help=L("GUI を出さずメタ一覧を標準出力", "print metadata list without GUI"))
+    ap.add_argument("--dir", nargs="+", type=Path, metavar="PATH",
+                    help=L("走査対象ディレクトリを指定 (複数可、既定の固定 3 dir を差し替え)",
+                           "directories to scan (multiple ok, overrides the default 3 fixed dirs)"))
     args = ap.parse_args()
 
-    if args.list:
-        run_list(VIEW_DIRS)
+    # --dir 指定時はユーザ指定 dir に差し替え。未指定は VIEW_DIRS (固定 3 dir)
+    if args.dir:
+        directories = [p.resolve() for p in args.dir]
+        missing = [p for p in directories if not p.is_dir()]
+        if missing:
+            for p in missing:
+                print(L(f"  [warn] ディレクトリが見つかりません: {p}",
+                        f"  [warn] directory not found: {p}"), file=sys.stderr)
     else:
-        run_gui(VIEW_DIRS)
+        directories = VIEW_DIRS
+
+    if args.list:
+        run_list(directories)
+    else:
+        run_gui(directories)
 
 
 if __name__ == "__main__":

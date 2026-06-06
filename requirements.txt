@@ -44,3 +44,7 @@ psutil
 # 画像アップロード (multipart POST)
 # ComfyUI 本体が依存しているため同 venv なら既にあるが、明示する
 requests
+
+# generate_gui.py のリファレンス画像ドラッグ&ドロップ (Tkinter には D&D 標準が無いので追加)
+# 無くても GUI 起動はする (D&D 機能だけ no-op になる)
+tkinterdnd2

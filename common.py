@@ -113,27 +113,64 @@ def load_prompt_config() -> dict:
         return tomllib.load(f)
 
 
+def _is_verb_pair(x) -> bool:
+    """wearing 拡張: 先頭要素が [verb, weight, alt_verb, alt_weight] の list か判定。"""
+    return isinstance(x, list) and len(x) >= 2 and isinstance(x[0], str)
+
+
+def _entry_weight_index(entry: list) -> int:
+    """エントリ内の weight 位置。新 wearing 形式 ([[verb_pair], value, weight, kw]) は 2、
+    通常 ([value, weight, kw]) は 1。"""
+    return 2 if (entry and _is_verb_pair(entry[0])) else 1
+
+
 def _wpick_entry(pairs: list) -> list | None:
-    """[[value, weight, kw?], ...] から 1 つ重み抽選してエントリ全体を返す。
-    pairs 空なら None。各エントリは可変長 ([value, weight] or [value, weight, kw])。
+    """エントリ list から 1 つ重み抽選してエントリ全体を返す。pairs 空なら None。
+    通常形式: [value, weight, kw?]
+    wearing 拡張形式: [[verb, w, alt_verb, alt_w], clothing, weight, kw]
+    どちらが混在しても各エントリの weight 位置を個別判定して扱う。
     """
     if not pairs:
         return None
-    weights = [max(0, int(p[1])) for p in pairs]
+    weights = [max(0, int(p[_entry_weight_index(p)])) for p in pairs]
     if sum(weights) == 0:
         return random.choice(pairs)
     return random.choices(pairs, weights=weights, k=1)[0]
 
 
 def _entry_value(entry: list | None) -> str:
-    return str(entry[0]) if entry else ""
+    """エントリの主値 (clothing/motion/place/character 文字列)。wearing 拡張形式は [1]。"""
+    if not entry:
+        return ""
+    if _is_verb_pair(entry[0]):
+        return str(entry[1]) if len(entry) >= 2 else ""
+    return str(entry[0])
 
 
 def _entry_keyword(entry: list | None) -> str:
-    """エントリの 3 番目要素 (LoRA キーワード) を返す。無ければ空文字。"""
-    if entry and len(entry) >= 3 and entry[2]:
-        return str(entry[2])
+    """エントリの LoRA キーワード。wearing 拡張形式は [3]、通常は [2]。無ければ空文字。"""
+    if not entry:
+        return ""
+    idx = 3 if _is_verb_pair(entry[0]) else 2
+    if len(entry) > idx and entry[idx]:
+        return str(entry[idx])
     return ""
+
+
+def _entry_verb(entry: list | None, default: str = "wearing") -> str:
+    """wearing 拡張形式 ([[verb, w, alt_verb, alt_w], ...]) の場合に verb_pair から重み抽選。
+    通常形式なら default を返す (旧 prompt.toml との後方互換)。"""
+    if not entry or not _is_verb_pair(entry[0]):
+        return default
+    pair = entry[0]
+    verbs = [str(pair[0]) if len(pair) >= 1 else default]
+    weights = [max(0, int(pair[1]) if len(pair) >= 2 else 1)]
+    if len(pair) >= 3:
+        verbs.append(str(pair[2]))
+        weights.append(max(0, int(pair[3]) if len(pair) >= 4 else 0))
+    if sum(weights) == 0:
+        return verbs[0] or default
+    return random.choices(verbs, weights=weights, k=1)[0] or default
 
 
 def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
@@ -240,9 +277,13 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
         w_entry = _wpick_entry(cfg.get("wearing") or [])
         w = _entry_value(w_entry)
         if w == "nothing":
+            # "nothing" は服そのものが無いので動詞は使わず "naked" を出す
             parts.append("naked")
         elif w:
-            parts.append(f"wearing {w}")
+            # 新形式 [[verb,w,alt,w], clothing, weight, kw] なら verb を抽選 (wearing/undressing/unwearing 等)
+            # 旧形式 [clothing, weight, kw] は "wearing" 固定
+            verb = _entry_verb(w_entry, default="wearing")
+            parts.append(f"{verb} {w}" if verb else w)
         kw = _entry_keyword(w_entry)
         if kw:
             lora_keywords.append(kw)

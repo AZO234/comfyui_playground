@@ -40,16 +40,19 @@ who = [
     ["**1girl, 2girls**", 20, false, false, false, true, ""],
 ]
 
-# 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
-# 例: ["swimsuit", 5, "swimsuit"]
-# - "nothing" → "naked" を 1 句として追加 (= 裸を明示)
-# - その他 → "wearing {clothing}" を 1 句として追加
-# 1 つを重み抽選
+# 何を着て: [[verb, w, alt_verb, alt_w], clothing, weight, lora_keywords]   (v2 / 動詞抽選あり)
+#   または旧形式 [clothing, weight, lora_keywords]                          (動詞 "wearing" 固定)
+# - [verb_pair] = [primary_verb, primary_weight, alt_verb, alt_weight]
+#     例: ["wearing", 80, "undressing", 20] → 80% "wearing dress" / 20% "undressing dress"
+#         ["wearing", 100, "", 0]            → 常に "wearing X" (互換用シンプル指定)
+# - "nothing" → "naked" を 1 句として追加 (動詞は使わない)
+# - その他 → "{verb} {clothing}" を 1 句として追加
+# 全エントリ中から weight (index 2) で 1 つ重み抽選
 wearing = [
-    ["nothing", 30, "naked"],
-    ["lingerie", 20, "lingerie"],
-    ["dress", 10, "dress"],
-    ["swimsuit", 10, "swimsuit"],
+    [["", 100, "", 0], "nothing", 30, "naked"],
+    [["wearing", 80, "undressing", 20], "dress", 30, "dress"],
+    [["wearing", 80, "unwearing", 20], "lingerie", 30, "lingerie"],
+    [["wearing", 80, "unwearing", 20], "swimsuit", 30, "swimsuit"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
@@ -58,7 +61,7 @@ wearing = [
 # - 採用された各 item は "with {item}" として個別句に展開される
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
-    ["nothing", 50, ""],
+    ["nothing", 70, ""],
     ["jewely", 5, "jewel"],
     ["necklace", 5, "jewel"],
     ["ear piace", 5, "jewel"],
@@ -70,29 +73,31 @@ with_items = [
 # 1 つを重み抽選
 motion = [
     ["standing", 50, ""],
+    ["squating", 50, "squat"],
     ["sitting", 50, ""],
+    ["leaning", 50, ""],
+    ["standing turn their back", 20, ""],
+    ["sitting turn their back", 20, ""],
     ["lying", 20, ""],
 ]
 
 # at 場所: 1 つを均等ランダム抽選、"at {place}" 形式
 at = [
-    ["room", 50, ""],
+    ["room", 30, ""],
     ["beach", 5, ""],
     ["on cauch", 10, ""],
     ["rooms bed", 10, ""],
-    ["hotels bed", 10, ""],
     ["bathroom", 5, ""],
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式
 lighting = [
-    "day lighting",
     "white lighting",
     "color lighting",
 ]
 
 # 必ず prompt 末尾に付加
-positive_always = "natural color"
+positive_always = "natural color, score_9, score_8, score_7"
 
 # 必ず negative_prompt の本体になる (build_prompt は negative も返す)
-negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated"
+negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated, don't water come out of hands, don't water come out of dildos."
