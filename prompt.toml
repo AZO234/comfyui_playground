@@ -40,19 +40,17 @@ who = [
     ["**1girl, 2girls**", 20, false, false, false, true, ""],
 ]
 
-# 何を着て: [[verb, w, alt_verb, alt_w], clothing, weight, lora_keywords]   (v2 / 動詞抽選あり)
-#   または旧形式 [clothing, weight, lora_keywords]                          (動詞 "wearing" 固定)
-# - [verb_pair] = [primary_verb, primary_weight, alt_verb, alt_weight]
-#     例: ["wearing", 80, "undressing", 20] → 80% "wearing dress" / 20% "undressing dress"
-#         ["wearing", 100, "", 0]            → 常に "wearing X" (互換用シンプル指定)
-# - "nothing" → "naked" を 1 句として追加 (動詞は使わない)
-# - その他 → "{verb} {clothing}" を 1 句として追加
-# 全エントリ中から weight (index 2) で 1 つ重み抽選
+# 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
+# 例: ["swimsuit", 5, "swimsuit"]
+# - "nothing" → "naked" を 1 句として追加 (= 裸を明示)
+# - その他 → "wearing {clothing}" を 1 句として追加
+# 1 つを重み抽選
 wearing = [
-    [["", 100, "", 0], "nothing", 30, "naked"],
-    [["wearing", 80, "undressing", 20], "dress", 30, "dress"],
-    [["wearing", 80, "unwearing", 20], "lingerie", 30, "lingerie"],
-    [["wearing", 80, "unwearing", 20], "swimsuit", 30, "swimsuit"],
+    ["nothing", 30, "naked"],
+    ["dress", 30, "dress"],
+    ["lingerie", 30, "lingerie"],
+    ["panty", 30, "panty"],
+    ["swimsuit", 30, "swimsuit"],
 ]
 
 # with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
