@@ -7,17 +7,17 @@ list = [
 ]
 
 [LoRA_preview_template]
-ware = "1lady, solo, full body, standing, looking at viewer, simple background"
+ware = "1lady, solo, full body, weared, standing, looking at viewer, simple background"
 doing1 = "1lady, solo, full body, simple background"
 doing2 = "2ladies, full body, interaction, simple background"
 doing3 = "3ladies, full body, interaction, simple background"
 doingmob = "ladies, full body, interaction, simple background"
-object = "no humans, simple background"
+object = "nobody, simple background"
 part = "1lady, solo, close-up, simple background"
 view = "1lady, solo, full body, simple background"
-place = "1lady, solo, full body, scenery"
+place = "nobody, scenery"
 artstyle = "1lady, solo, upper body, looking at viewer, detailed, simple background"
 unknown = "1lady, solo, upper body, simple background"
 
 [checkpoint_preview_template]
-default = "1lady, solo, full body, standing, looking at viewer, simple background"
+default = "1lady, solo, full body, weared, standing, looking at viewer, simple background"

@@ -461,9 +461,9 @@ def build_workflow_txt2img(
     controlnet_strength: float = 0.7,
     upscale_model: Optional[str] = None,
     adetailer: bool = False,
-    adetailer_face_model: str = "bbox/face_yolov8n.pt",
-    adetailer_hand_model: Optional[str] = "bbox/hand_yolov8n.pt",
-    adetailer_person_model: Optional[str] = "segm/person_yolov8n-seg.pt",
+    adetailer_face_model: str = "bbox/face_yolov8s.pt",
+    adetailer_hand_model: Optional[str] = "bbox/hand_yolov8s.pt",
+    adetailer_person_model: Optional[str] = "segm/person_yolov8s-seg.pt",
     adetailer_denoise: float = 0.35,
     adetailer_person_denoise: float = 0.3,
     adetailer_steps: int = 30,
@@ -471,6 +471,7 @@ def build_workflow_txt2img(
     hires_scale: float = 1.5,
     hires_denoise: float = 0.35,
     hires_steps: int = 20,
+    vae_override: Optional[str] = None,
 ) -> dict:
     """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
 
@@ -499,6 +500,18 @@ def build_workflow_txt2img(
     # 初期 model/clip ハンドル = CheckpointLoaderSimple の MODEL (out 0) / CLIP (out 1)
     model_ref = ["1", 0]
     clip_ref  = ["1", 1]
+    # VAE: 外部 VAE 明示時は VAELoader (node 50) を経由、未指定は checkpoint 同梱 VAE
+    # checkpoint 同梱 VAE は author 依存で encode/decode round-trip の色挙動がまちまち。
+    # person ADetailer (全身領域 inpaint) で全画面色シフトが出る既知バグ対策として
+    # madebyollin/sdxl-vae-fp16-fix 等の安定 VAE に差し替える経路を用意 (2026-06-11)。
+    if vae_override:
+        workflow["50"] = {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": vae_override},
+        }
+        vae_ref = ["50", 0]
+    else:
+        vae_ref = ["1", 2]
 
     # LoRA stacking: 順次 LoraLoader をチェーン
     for i, (lora_name, strength) in enumerate(loras or []):
@@ -542,7 +555,7 @@ def build_workflow_txt2img(
         }
         workflow["42"] = {
             "class_type": "VAEEncode",
-            "inputs": {"pixels": ["41", 0], "vae": ["1", 2]},
+            "inputs": {"pixels": ["41", 0], "vae": vae_ref},
         }
         latent_ref = ["42", 0]
         ksampler_denoise = float(denoise)
@@ -612,7 +625,7 @@ def build_workflow_txt2img(
     }
     workflow["6"] = {
         "class_type": "VAEDecode",
-        "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+        "inputs": {"samples": ["5", 0], "vae": vae_ref},
     }
     # Hires Fix: ImageScale 方式 (旧 sd_playground の diffusers Img2ImgPipeline と同等)。
     #   1段目 latent (node 5) → VAEDecode (29) → ImageScale lanczos (30)
@@ -626,7 +639,7 @@ def build_workflow_txt2img(
         target_h = max(64, (int(base_h * hires_scale) // 8) * 8)
         workflow["29"] = {
             "class_type": "VAEDecode",
-            "inputs": {"samples": ["5", 0], "vae": ["1", 2]},
+            "inputs": {"samples": ["5", 0], "vae": vae_ref},
         }
         workflow["30"] = {
             "class_type": "ImageScale",
@@ -640,7 +653,7 @@ def build_workflow_txt2img(
         }
         workflow["33"] = {
             "class_type": "VAEEncode",
-            "inputs": {"pixels": ["30", 0], "vae": ["1", 2]},
+            "inputs": {"pixels": ["30", 0], "vae": vae_ref},
         }
         workflow["31"] = {
             "class_type": "KSampler",
@@ -659,7 +672,7 @@ def build_workflow_txt2img(
         }
         workflow["32"] = {
             "class_type": "VAEDecode",
-            "inputs": {"samples": ["31", 0], "vae": ["1", 2]},
+            "inputs": {"samples": ["31", 0], "vae": vae_ref},
         }
         final_image_ref = ["32", 0]
     else:
@@ -674,7 +687,7 @@ def build_workflow_txt2img(
                 "image": image_ref,
                 "model": model_ref,
                 "clip": clip_ref,
-                "vae": ["1", 2],
+                "vae": vae_ref,
                 "guide_size": float(guide_size),
                 "guide_size_for": True,
                 "max_size": float(max_size),
@@ -1073,6 +1086,45 @@ def ensure_adetailer_model(rel_name: Optional[str]) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# SDXL 安定版 VAE (madebyollin/sdxl-vae-fp16-fix) の自動 DL
+# checkpoint 同梱 VAE は author 依存で encode/decode round-trip の色シフト挙動が
+# まちまち。person ADetailer (= 全身領域 inpaint) で全画面茶色フィルム化する
+# 既知バグの原因として VAE round-trip 色シフトが疑われたため、定番安定版 VAE に
+# 明示的に差し替える経路を設けた (2026-06-11)。
+# --------------------------------------------------------------------------- #
+VAE_DIR = COMFYUI_DIR / "models" / "vae"
+_SDXL_VAE_FIX_REPO = "madebyollin/sdxl-vae-fp16-fix"
+_SDXL_VAE_FIX_FILE = "sdxl_vae.safetensors"  # HF 上のファイル名
+_SDXL_VAE_FIX_LOCAL = "sdxl_vae_fp16_fix.safetensors"  # ComfyUI 側の保存名
+
+
+def ensure_sdxl_vae_fix() -> Optional[str]:
+    """madebyollin/sdxl-vae-fp16-fix の VAE を ComfyUI/models/vae/ に配置し、ファイル名を返す。
+    既に置いてあればそのまま返す。DL 失敗時は None (caller 側で checkpoint 同梱 VAE にフォールバック)。
+    """
+    full = VAE_DIR / _SDXL_VAE_FIX_LOCAL
+    if full.is_file():
+        return _SDXL_VAE_FIX_LOCAL
+    print(L(f"  [vae] {_SDXL_VAE_FIX_LOCAL} が無い → {_SDXL_VAE_FIX_REPO} から DL 試行...",
+            f"  [vae] {_SDXL_VAE_FIX_LOCAL} not found → attempting download from {_SDXL_VAE_FIX_REPO}..."), flush=True)
+    try:
+        from huggingface_hub import hf_hub_download
+        import shutil
+        src = hf_hub_download(_SDXL_VAE_FIX_REPO, _SDXL_VAE_FIX_FILE)
+        full.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, full)
+        print(L(f"  [vae] DL 完了 → {full} ({full.stat().st_size // 1024} KB)",
+                f"  [vae] download complete → {full} ({full.stat().st_size // 1024} KB)"), flush=True)
+        return _SDXL_VAE_FIX_LOCAL
+    except Exception as e:
+        print(L(f"  [vae][warn] {_SDXL_VAE_FIX_LOCAL} 自動 DL 失敗 ({type(e).__name__})。"
+                f"checkpoint 同梱 VAE にフォールバック",
+                f"  [vae][warn] {_SDXL_VAE_FIX_LOCAL} download failed ({type(e).__name__}). "
+                f"Falling back to checkpoint's bundled VAE"), flush=True)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # PNG メタからプロンプト読出 (--prompt png モード)
 # --------------------------------------------------------------------------- #
 def parse_png_prompt_metadata(png_path: Path) -> tuple[str, str, list[str]]:
@@ -1376,6 +1428,82 @@ def augment_positive_with_lora_keywords(positive: str, lora_keywords: list[str],
     return appended
 
 
+def prepare_workflow_prompt(
+    positive: str,
+    negative: str,
+    *,
+    lora_keywords: Optional[list[str]] = None,
+    picked_loras: Optional[list[tuple[Path, float]]] = None,
+    checkpoint_path: Path,
+    checkpoint_data: dict,
+    neg_embed_stems: Optional[list[str]] = None,
+    explicit_quality_prefix: str = "",
+    force_pony_prefix: bool = False,
+    controlnet_mode: str = "",
+    sdxl_lora_subjects: Optional[dict[str, str]] = None,
+    pony_cap: int = 3,
+    lora_total: float = 0.8,
+) -> tuple[str, str, list[tuple[Path, float]], list[str]]:
+    """positive/negative を CLI と同じ手順で拡張し、(positive_aug, negative_aug, loras_filtered, logs) を返す。
+
+    一括処理: pose-gate / family-gate / score prefix / kw append / neg-gate + embed append。
+    GUI と CLI の両方からこの 1 関数を通すことでプロンプト augmentation が常に一致する。
+    logs は caller 側で print する想定 (空なら何も出さない)。
+    """
+    logs: list[str] = []
+    loras = list(picked_loras or [])
+    subjects = sdxl_lora_subjects or {}
+
+    # pose-gate: OpenPose ControlNet と pose 系 LoRA の取り合い回避
+    if controlnet_mode == "openpose" and loras:
+        dropped = [p.name for p, _ in loras if subjects.get(p.stem) == "pose"]
+        if dropped:
+            loras = [(p, s) for p, s in loras if subjects.get(p.stem) != "pose"]
+            logs.append(L(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped)}",
+                          f"  [pose-gate] OpenPose active → dropping pose LoRAs: {', '.join(dropped)}"))
+
+    # family-gate: 非 Pony SDXL base に Pony LoRA を載せると崩壊するので除外
+    is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
+    ckpt_lane = checkpoint_version(checkpoint_path)
+    if loras and ckpt_lane == "sdxl" and not is_pony:
+        dropped = [p.name for p, _ in loras if _is_pony_name(p.stem)]
+        if dropped:
+            loras = [(p, s) for p, s in loras if not _is_pony_name(p.stem)]
+            logs.append(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped)}",
+                          f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped)}"))
+
+    # quality 前置: 明示 > --pony > family=pony
+    explicit_stripped = (explicit_quality_prefix or "").strip()
+    eff_prefix = explicit_stripped
+    if not eff_prefix and (force_pony_prefix or is_pony):
+        eff_prefix = PONY_SCORE_PREFIX
+    pos_for_stage = positive
+    if eff_prefix and not positive.lower().startswith(eff_prefix.split(",")[0].strip().lower()):
+        pos_for_stage = f"{eff_prefix}, {positive}" if positive else eff_prefix
+        src = L("明示", "explicit") if explicit_stripped else \
+              ("--pony" if force_pony_prefix else "family=pony")
+        logs.append(f"  [score] {src} → {eff_prefix.split(',')[0].strip()}…")
+
+    # LoRA キーワード末尾 append (重み付き)
+    positive_augmented = augment_positive_with_lora_keywords(
+        pos_for_stage, lora_keywords or [], total_weight=lora_total)
+    if positive_augmented != pos_for_stage:
+        logs.append(f"  prompt+kw : ...{positive_augmented[len(pos_for_stage):][:80]}")
+
+    # neg embedding gate (Pony cap / 非Pony→Pony embed 除外) + append
+    neg_stems_in = list(neg_embed_stems or [])
+    gated_neg = gate_neg_embeddings(neg_stems_in, is_pony, pony_cap=pony_cap)
+    if len(gated_neg) != len(neg_stems_in):
+        dropped = [e for e in neg_stems_in if e not in gated_neg]
+        why = L("Pony embed 上限3超過", "Pony embed cap exceeded (3)") if is_pony \
+              else L("非Pony → Pony embed", "non-Pony → Pony embed")
+        logs.append(L(f"  [neg-gate] {why} 除外: {', '.join(dropped)}",
+                      f"  [neg-gate] {why} excluded: {', '.join(dropped)}"))
+    negative_augmented = augment_negative_with_embeddings(negative, gated_neg)
+
+    return positive_augmented, negative_augmented, loras, logs
+
+
 # --------------------------------------------------------------------------- #
 # プロンプト (mode 別ハンドリング)
 # --------------------------------------------------------------------------- #
@@ -1623,6 +1751,9 @@ def main() -> None:
                     help=L("checkpoint を固定。NAME or NAME.safetensors",
                            "fix checkpoint. NAME or NAME.safetensors"))
     ap.add_argument("--cfg-scale", type=float, default=7.0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help=L("seed を固定 (再現/比較用。未指定なら毎枚 random)",
+                           "fix seed (for reproduction/A-B compare. default: random per image)"))
     ap.add_argument("--width", type=int, default=None,
                     help=L("生成幅 (未指定: sdxl=1024 / sd15=512)", "generation width (default: sdxl=1024 / sd15=512)"))
     ap.add_argument("--height", type=int, default=None,
@@ -1666,16 +1797,16 @@ def main() -> None:
     ap.add_argument("--adetailer", action=argparse.BooleanOptionalAction, default=None,
                     help=L("ADetailer (顔/手 YOLO inpainting)。既定: gear high で ON / low で OFF",
                            "ADetailer (face/hand YOLO inpainting). Default: ON for gear high / OFF for low"))
-    ap.add_argument("--adetailer-face-model", type=str, default="bbox/face_yolov8n.pt",
-                    help=L("ADetailer 顔検出 model (既定 face_yolov8n)", "ADetailer face detection model (default face_yolov8n)"))
-    ap.add_argument("--adetailer-hand-model", type=str, default="bbox/hand_yolov8n.pt",
-                    help=L("ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8n)",
-                           "ADetailer hand detection model (empty string to disable hand, default hand_yolov8n)"))
-    ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8n-seg.pt",
-                    help=L("ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8n-seg)。"
+    ap.add_argument("--adetailer-face-model", type=str, default="bbox/face_yolov8s.pt",
+                    help=L("ADetailer 顔検出 model (既定 face_yolov8s)", "ADetailer face detection model (default face_yolov8s)"))
+    ap.add_argument("--adetailer-hand-model", type=str, default="bbox/hand_yolov8s.pt",
+                    help=L("ADetailer 手検出 model (空文字で hand OFF、既定 hand_yolov8s)",
+                           "ADetailer hand detection model (empty string to disable hand, default hand_yolov8s)"))
+    ap.add_argument("--adetailer-person-model", type=str, default="segm/person_yolov8s-seg.pt",
+                    help=L("ADetailer 全身検出 model (空文字で person OFF、既定 person_yolov8s-seg)。"
                            "足/脚の奇形補正に使用、denoise を低めで構造維持",
-                           "ADetailer full-body detection model (empty string to disable, default person_yolov8n-seg). "
-                           "Used to correct leg/foot artifacts; lower denoise to preserve structure"))
+                           "ADetailer full-body detection model (empty to disable, default person_yolov8s-seg). "
+                           "Used for leg/foot anatomy correction; lower denoise to preserve structure"))
     ap.add_argument("--adetailer-denoise", type=float, default=0.35,
                     help=L("ADetailer (face/hand) inpaint strength (既定 0.35、低めで合成 seam 防止)",
                            "ADetailer (face/hand) inpaint strength (default 0.35, lower to prevent composite seam)"))
@@ -1685,6 +1816,13 @@ def main() -> None:
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help=L("ADetailer 各 detected region のステップ数 (既定 30)",
                            "ADetailer inference steps per detected region (default 30)"))
+    ap.add_argument("--sdxl-vae", action=argparse.BooleanOptionalAction, default=True,
+                    help=L("SDXL ckpt のとき madebyollin/sdxl-vae-fp16-fix を自動 DL + 使用 (既定 ON)。"
+                           "checkpoint 同梱 VAE の round-trip 色シフト (person ADetailer の茶色化) 対策。"
+                           "SD15 ckpt には無影響",
+                           "Use madebyollin/sdxl-vae-fp16-fix for SDXL checkpoints (auto-download, default ON). "
+                           "Mitigates round-trip color shift from bundled VAE (person ADetailer sepia bug). "
+                           "No effect on SD15 checkpoints"))
     ap.add_argument("--hires-fix", action=argparse.BooleanOptionalAction, default=None,
                     help=L("Hires Fix (低解像度→1.5×二段)。draft / 清書段の両方に効く。"
                            "既定: gear high で ON / low で OFF",
@@ -1852,6 +1990,12 @@ def main() -> None:
                     "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
             args.adetailer = False
 
+    # SDXL 安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
+    sdxl_vae_name: Optional[str] = ensure_sdxl_vae_fix() if args.sdxl_vae else None
+    if sdxl_vae_name:
+        print(L(f"  [vae] SDXL 用 VAE 差し替え: {sdxl_vae_name}",
+                f"  [vae] SDXL VAE override: {sdxl_vae_name}"), flush=True)
+
     # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
     pose_png: Optional[Path] = None
     pose_upload_name: Optional[str] = None
@@ -1897,7 +2041,7 @@ def main() -> None:
             iter_pool = [SDXL_CHECKPOINT_DIR] if is_refine else pool_dirs
             checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, fixed_checkpoint, pool_dirs=iter_pool)
             ckpt_lane = checkpoint_version(checkpoint_path)  # 当選版 (3_1=sd15 / 4_1=sdxl)
-            seed = random.randint(0, 2**32 - 1)
+            seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
             many = bool(extras.get("many") or args.many)
 
             print(f"\n=== source {total+1} ===")
@@ -2047,28 +2191,6 @@ def main() -> None:
                             f"  [warn] ControlNet source image upload failed ({e}), CN OFF"), flush=True)
                             picked_controlnet = None
 
-            # OpenPose 有効時は pose 系 LoRA を除外 (姿勢の取り合い回避、SDXL_LoRA_hint.toml subject=pose)
-            if controlnet_mode == "openpose" and picked_loras:
-                dropped_pose = [p.name for p, _ in picked_loras
-                                if sdxl_lora_subjects.get(p.stem) == "pose"]
-                if dropped_pose:
-                    picked_loras = [(p, s) for p, s in picked_loras
-                                    if sdxl_lora_subjects.get(p.stem) != "pose"]
-                    print(L(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped_pose)}",
-                            f"  [pose-gate] OpenPose active → dropping pose LoRAs: {', '.join(dropped_pose)}"))
-
-            # family ゲート: 非 Pony base → Pony LoRA を除外。
-            # Pony LoRA は Pony Diffusion XL 専用 (score_9 系前提) で、Illustrious/realistic
-            # SDXL に乗せると subject が崩壊して人物が消える。embedding と同じ非対称ガード。
-            if picked_loras and ckpt_lane == "sdxl" \
-                    and not checkpoint_is_pony(checkpoint_path, checkpoint_data):
-                dropped_pony = [p.name for p, _ in picked_loras if _is_pony_name(p.stem)]
-                if dropped_pony:
-                    picked_loras = [(p, s) for p, s in picked_loras
-                                    if not _is_pony_name(p.stem)]
-                    print(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped_pony)}",
-                            f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped_pony)}"))
-
             print(f"  path      : {pipeline_label}")
             print(f"  checkpoint: {checkpoint_path.name} ({ckpt_lane.upper()})"
                   f"{L(' (未計測)', ' (unscored)') if checkpoint_path.stem not in checkpoint_data else ''}")
@@ -2100,33 +2222,22 @@ def main() -> None:
                 # 必要なら HF release から自動 DL。失敗時は None で upscale 段を無効化 (workflow が落ちないように)
                 upscale_model_name = ensure_upscale_model(upscale_model_name)
 
-            # この段 (清書/単一パス = checkpoint_path) の系統を確定 (family タグ優先・無ければ名前)
+            # 全 augmentation を共通 helper に集約 (GUI と同じ経路、プロンプトの最終形が必ず一致)
+            positive_augmented, negative_augmented, picked_loras, gate_logs = prepare_workflow_prompt(
+                positive, negative,
+                lora_keywords=lora_keywords,
+                picked_loras=picked_loras,
+                checkpoint_path=checkpoint_path,
+                checkpoint_data=checkpoint_data,
+                neg_embed_stems=active["neg"],
+                explicit_quality_prefix=explicit_prefix,
+                force_pony_prefix=args.pony,
+                controlnet_mode=controlnet_mode,
+                sdxl_lora_subjects=sdxl_lora_subjects,
+            )
+            for line in gate_logs:
+                print(line)
             ckpt_is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
-
-            # quality 前置: 明示 > --pony > family==pony 自動。SD15 下書き段には付けない (ここは清書/単一段)
-            eff_prefix = explicit_prefix
-            if not eff_prefix and (args.pony or ckpt_is_pony):
-                eff_prefix = PONY_SCORE_PREFIX
-            pos_for_stage = positive
-            if eff_prefix and not positive.lower().startswith(eff_prefix.split(",")[0].strip().lower()):
-                pos_for_stage = f"{eff_prefix}, {positive}" if positive else eff_prefix
-                src = L("明示", "explicit") if explicit_prefix else ("--pony" if args.pony else "family=pony")
-                print(f"  [score] {src} → {eff_prefix.split(',')[0].strip()}…")
-
-            # LoRA キーワードを (0.8/N) 重みで positive に append (README L193 仕様)
-            positive_augmented = augment_positive_with_lora_keywords(pos_for_stage, lora_keywords)
-            if positive_augmented != pos_for_stage:
-                print(f"  prompt+kw : ...{positive_augmented[len(pos_for_stage):][:80]}")
-
-            # 負のクオリティ embedding を negative に追加 (active lane の embed)。
-            # Pony 専用 embed は Pony checkpoint のときだけ通す (非 Pony への誤爆 = 色崩壊/主体消失を防ぐ)。
-            gated_neg = gate_neg_embeddings(active["neg"], ckpt_is_pony)
-            if len(gated_neg) != len(active["neg"]):
-                dropped = [e for e in active["neg"] if e not in gated_neg]
-                why = L("Pony embed 上限3超過", "Pony embed cap exceeded (3)") if ckpt_is_pony else L("非Pony → Pony embed", "non-Pony → Pony embed")
-                print(L(f"  [neg-gate] {why} 除外: {', '.join(dropped)}",
-                        f"  [neg-gate] {why} excluded: {', '.join(dropped)}"))
-            negative_augmented = augment_negative_with_embeddings(negative, gated_neg)
 
             workflow_loras = [(p.name, s) for p, s in picked_loras]
             workflow = build_workflow_txt2img(
@@ -2152,6 +2263,8 @@ def main() -> None:
                 adetailer_steps=args.adetailer_steps,
                 hires_fix=args.hires_fix, hires_scale=args.hires_scale,
                 hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
+                # SDXL ckpt のときだけ安定 VAE を被せる (SD15 には流用不可)
+                vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else None,
             )
             if args.adetailer:
                 parts = [f"face={face_model}"]

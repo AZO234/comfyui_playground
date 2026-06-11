@@ -60,10 +60,15 @@ from generate import (
     UPSCALED_DIR,
     _submit_and_fetch,
     build_workflow_txt2img,
+    collect_negative_embeddings,
     ensure_adetailer_model,
     ensure_comfyui_arch,
+    ensure_sdxl_vae_fix,
     ensure_upscale_model,
     infer_controlnet_mode,
+    load_checkpoint_toml,
+    load_sdxl_lora_subjects,
+    prepare_workflow_prompt,
     save_with_a1111_metadata,
     upload_image_to_comfyui,
     write_extra_model_paths,
@@ -136,13 +141,9 @@ class GenerateGUI:
         self.checkpoints: list[Path] = []
         self.loras_sd15: list[Path] = []
         self.loras_sdxl: list[Path] = []
-        self.embeds_sd15: list[Path] = []
-        self.embeds_sdxl: list[Path] = []
         self.controlnets: list[Path] = []
         self.current_loras: list[Path] = []
-        self.current_embeds: list[Path] = []
         self.selected_lora_indices: set[int] = set()
-        self.selected_embed_indices: set[int] = set()
         self.selected_controlnet_index: int = -1
 
         # リファレンス画像 (D&D 入力)
@@ -264,22 +265,19 @@ class GenerateGUI:
         )
         self.lora_icon_canvas.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
 
-        # ControlNet (SDXL のみ) + Embedding (版でフィルタ) を横並び
+        # ControlNet (SDXL のみ) — Embedding は CLI と同じ自動投入経路 (helper) に集約済み
         row += 1
-        ttk.Label(top, text="ControlNet / Embedding:").grid(
+        ttk.Label(top, text="ControlNet:").grid(
             row=row, column=0, sticky="ne", padx=4, pady=4)
         cn_emb_frame = ttk.Frame(top)
         cn_emb_frame.grid(row=row, column=1, sticky="ew", padx=4, pady=4)
         cn_emb_frame.grid_columnconfigure(0, weight=1)
-        cn_emb_frame.grid_columnconfigure(1, weight=1)
 
         ttk.Label(cn_emb_frame, text="ControlNet (SDXL のみ、単一選択):",
-                  foreground="#666").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        ttk.Label(cn_emb_frame, text="Embedding (negative に自動追加):",
-                  foreground="#666").grid(row=0, column=1, sticky="w", padx=(4, 0))
+                  foreground="#666").grid(row=0, column=0, sticky="w")
 
         cn_box = ttk.Frame(cn_emb_frame)
-        cn_box.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        cn_box.grid(row=1, column=0, sticky="ew")
         self.cn_listbox = tk.Listbox(
             cn_box, selectmode=tk.SINGLE, height=4, exportselection=False,
         )
@@ -288,17 +286,6 @@ class GenerateGUI:
         cn_scroll.pack(side=tk.LEFT, fill=tk.Y)
         self.cn_listbox.config(yscrollcommand=cn_scroll.set)
         self.cn_listbox.bind("<<ListboxSelect>>", self._on_cn_select)
-
-        emb_box = ttk.Frame(cn_emb_frame)
-        emb_box.grid(row=1, column=1, sticky="ew", padx=(4, 0))
-        self.embed_listbox = tk.Listbox(
-            emb_box, selectmode=tk.EXTENDED, height=4, exportselection=False,
-        )
-        self.embed_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        emb_scroll = ttk.Scrollbar(emb_box, orient=tk.VERTICAL, command=self.embed_listbox.yview)
-        emb_scroll.pack(side=tk.LEFT, fill=tk.Y)
-        self.embed_listbox.config(yscrollcommand=emb_scroll.set)
-        self.embed_listbox.bind("<<ListboxSelect>>", self._on_embed_select)
 
         # ControlNet を populate (1 回だけ、checkpoint 切替で消さない)
         for p in self.controlnets:
@@ -401,7 +388,7 @@ class GenerateGUI:
         self.adetailer_var = tk.BooleanVar(value=True)
         # person 系 ADetailer は crop_factor=3.0 で 2 人を 1 bbox にまとめ → 茶色フィルム化
         # する不具合あり (2026-06-05)。既定 OFF とし、必要時のみ ON。
-        self.adetailer_person_var = tk.BooleanVar(value=False)
+        self.adetailer_person_var = tk.BooleanVar(value=True)
         self.hires_var = tk.BooleanVar(value=True)
         # 各 gen 画像を生成直後に Real-ESRGAN x4 で自動 upscale (既定 ON)
         self.auto_upscale_var = tk.BooleanVar(value=True)
@@ -471,8 +458,6 @@ class GenerateGUI:
         )
         self.loras_sd15 = _list_safetensors(SD15_LORA_DIR)
         self.loras_sdxl = _list_safetensors(SDXL_LORA_DIR)
-        self.embeds_sd15 = _list_safetensors(SD15_EMBED_DIR)
-        self.embeds_sdxl = _list_safetensors(SDXL_EMBED_DIR)
         self.controlnets = _list_safetensors(SDXL_CONTROLNET_DIR)
 
     def _filtered_checkpoints(self) -> list[Path]:
@@ -548,19 +533,11 @@ class GenerateGUI:
         self.selected_lora_indices.clear()
         self._refresh_lora_icons()
 
-        # Embedding は版で切り替え (LoRA と同じパターン)
-        if hasattr(self, "embed_listbox"):
-            self.current_embeds = (
-                self.embeds_sd15 if version == "sd15" else self.embeds_sdxl
-            )
-            self.embed_listbox.delete(0, tk.END)
-            for p in self.current_embeds:
-                self.embed_listbox.insert(tk.END, p.stem)
-            self.selected_embed_indices.clear()
-            # SD15 を選んだら ControlNet は使えないので選択解除
-            if version == "sd15" and hasattr(self, "cn_listbox"):
-                self.cn_listbox.selection_clear(0, tk.END)
-                self.selected_controlnet_index = -1
+        # Embedding は worker 側で helper が CLI と同じ自動投入 (UI 不要)
+        # SD15 を選んだら ControlNet は使えないので選択解除
+        if version == "sd15" and hasattr(self, "cn_listbox"):
+            self.cn_listbox.selection_clear(0, tk.END)
+            self.selected_controlnet_index = -1
 
         # 解像度を版に合わせて自動セット (ユーザが弄った後は次の checkpoint 切替で上書きされる点に注意)
         if hasattr(self, "width_var"):
@@ -574,9 +551,6 @@ class GenerateGUI:
     def _on_cn_select(self, event=None) -> None:
         sel = self.cn_listbox.curselection()
         self.selected_controlnet_index = sel[0] if sel else -1
-
-    def _on_embed_select(self, event=None) -> None:
-        self.selected_embed_indices = set(self.embed_listbox.curselection())
 
     # ---------- リファレンス画像 D&D ---------- #
     def _on_ref_drop(self, event) -> None:
@@ -720,14 +694,9 @@ class GenerateGUI:
         loras = [self.current_loras[i] for i in sorted(self.selected_lora_indices)]
         lora_total = float(self.lora_total_var.get())
         scale = lora_total / max(1, len(loras))
-        loras_with_strength = [(p.name, scale) for p in loras]
-
-        # 選択された Embedding stem 一覧 (negative に embedding:<stem> として埋め込む)
-        embeds = [self.current_embeds[i] for i in sorted(self.selected_embed_indices)]
-        embed_stems = [p.stem for p in embeds]
-        if embed_stems:
-            embed_prefix = ", ".join(f"embedding:{s}" for s in embed_stems)
-            negative = f"{embed_prefix}, {negative}" if negative else embed_prefix
+        # Path で運ぶ (helper の family-gate / pose-gate で stem を参照するため)
+        loras_with_strength = [(p, scale) for p in loras]
+        # negative embedding は worker 側で helper が CLI と同じ neg-gate + append を行う
 
         # 選択された ControlNet (SDXL のみ)。リファレンス画像が D&D されている場合のみ実配線される
         # 手動選択優先 / 無ければ ref_mode に対応する ControlNet を auto pick
@@ -1063,12 +1032,19 @@ class GenerateGUI:
         if params["adetailer"]:
             self._result_queue.put({"status": "ADetailer モデル確認中..."})
             try:
-                face_model = ensure_adetailer_model("bbox/face_yolov8n.pt")
-                hand_model = ensure_adetailer_model("bbox/hand_yolov8n.pt")
+                face_model = ensure_adetailer_model("bbox/face_yolov8s.pt")
+                hand_model = ensure_adetailer_model("bbox/hand_yolov8s.pt")
                 if params.get("adetailer_person"):
-                    person_model = ensure_adetailer_model("segm/person_yolov8n-seg.pt")
+                    person_model = ensure_adetailer_model("segm/person_yolov8s-seg.pt")
             except Exception as e:
                 self._result_queue.put({"status": f"ADetailer モデル準備失敗 ({e}) → スキップ"})
+
+        # SDXL 安定 VAE (madebyollin/sdxl-vae-fp16-fix) を起動時 1 回 DL + 解決
+        # checkpoint 同梱 VAE の round-trip 色シフト対策。SDXL ckpt のときだけ使う
+        try:
+            sdxl_vae_name = ensure_sdxl_vae_fix()
+        except Exception:
+            sdxl_vae_name = None
 
         base_w = int(params["width"])
         base_h = int(params["height"])
@@ -1090,6 +1066,24 @@ class GenerateGUI:
             lora_params_cache = load_lora_params()
         except Exception:
             lora_params_cache = {}
+
+        # CLI と同じプロンプト augmentation (prepare_workflow_prompt) に渡す共通 context
+        # score prefix / kw append / neg embed 自動投入 / family-gate / pose-gate を一括処理
+        try:
+            checkpoint_data = load_checkpoint_toml()
+        except Exception:
+            checkpoint_data = {}
+        try:
+            sdxl_lora_subjects = load_sdxl_lora_subjects()
+        except Exception:
+            sdxl_lora_subjects = {}
+        try:
+            neg_embed_by_ver = {
+                "sd15": collect_negative_embeddings(SD15_EMBED_DIR),
+                "sdxl": collect_negative_embeddings(SDXL_EMBED_DIR),
+            }
+        except Exception:
+            neg_embed_by_ver = {"sd15": [], "sdxl": []}
 
         # リファレンス画像 (ControlNet) を 1 回だけアップロード。失敗時は ControlNet を OFF
         cn_name: Optional[str] = params.get("controlnet")
@@ -1154,7 +1148,7 @@ class GenerateGUI:
                     this_pool, lora_keywords, corpus, n_max=3, n_min=1,
                 )
                 scale = lora_total / max(1, len(picked))
-                this_loras = [(p.name, scale) for p in picked]
+                this_loras = [(p, scale) for p in picked]
             else:
                 this_loras = []
 
@@ -1175,11 +1169,30 @@ class GenerateGUI:
             # SDXL のみ ControlNet 配線 (SD15 ckpt が混ざる場合は cn 引数を捨てる)
             this_cn_name = cn_name if this_version == "sdxl" else None
             this_cn_image = ref_uploaded_name if this_cn_name else None
+            effective_cn_mode = cn_mode if this_cn_name else ""
+
+            # CLI と同じ helper で augmentation 集約: score prefix / kw append / neg embed / family-gate / pose-gate
+            positive_aug, negative_aug, this_loras_filtered, gate_logs = prepare_workflow_prompt(
+                params["positive"], params["negative"],
+                lora_keywords=lora_keywords,
+                picked_loras=this_loras,
+                checkpoint_path=this_ckpt,
+                checkpoint_data=checkpoint_data,
+                neg_embed_stems=neg_embed_by_ver.get(this_version, []),
+                explicit_quality_prefix="",
+                force_pony_prefix=False,
+                controlnet_mode=effective_cn_mode,
+                sdxl_lora_subjects=sdxl_lora_subjects,
+                lora_total=lora_total,
+            )
+            for line in gate_logs:
+                print(line, flush=True)
+            workflow_loras = [(p.name, s) for p, s in this_loras_filtered]
 
             workflow = build_workflow_txt2img(
                 checkpoint=this_ckpt.name,
-                positive=params["positive"],
-                negative=params["negative"],
+                positive=positive_aug,
+                negative=negative_aug,
                 seed=seed,
                 steps=steps,
                 cfg=cfg,
@@ -1187,9 +1200,9 @@ class GenerateGUI:
                 height=this_h,
                 sampler_name=sampler,
                 scheduler=scheduler,
-                loras=this_loras or None,
+                loras=workflow_loras or None,
                 adetailer=params["adetailer"],
-                adetailer_face_model=face_model or "bbox/face_yolov8n.pt",
+                adetailer_face_model=face_model or "bbox/face_yolov8s.pt",
                 adetailer_hand_model=hand_model,
                 adetailer_person_model=person_model,
                 hires_fix=params["hires_fix"],
@@ -1200,6 +1213,8 @@ class GenerateGUI:
                 controlnet_mode=cn_mode,
                 controlnet_image=this_cn_image,
                 controlnet_strength=cn_strength,
+                # SDXL のときだけ安定 VAE を被せる (SD15 ckpt には流用不可)
+                vae_override=sdxl_vae_name if this_version == "sdxl" else None,
             )
 
             try:
@@ -1221,12 +1236,12 @@ class GenerateGUI:
             try:
                 save_with_a1111_metadata(
                     img_bytes, out_path,
-                    positive=params["positive"], negative=params["negative"], seed=seed,
+                    positive=positive_aug, negative=negative_aug, seed=seed,
                     steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler,
                     width=final_w, height=final_h,
                     checkpoint=this_ckpt.name,
                     lora_keywords=lora_keywords,
-                    loras=this_loras or None,
+                    loras=workflow_loras or None,
                     adetailer=params["adetailer"],
                     pipeline="GUI",
                 )

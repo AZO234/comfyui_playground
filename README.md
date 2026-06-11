@@ -508,12 +508,12 @@ Runs 300 draws and prints the Top 30 LoRA selection probabilities as a bar chart
 - `manual` : Each draw uses entries chosen interactively from `prompt.toml`
 - `lora_keyword` : Each draw uses the LoRA keywords you type
 
-## Auto-placement of face_yolov8n.pt, hand_yolov8n.pt, person_yolov8n-seg.pt
+## Auto-placement of face_yolov8s.pt, hand_yolov8s.pt, person_yolov8s-seg.pt
 
 The following detection models are downloaded and placed automatically if missing:
-- `ComfyUI/models/ultralytics/bbox/face_yolov8n.pt`
-- `ComfyUI/models/ultralytics/bbox/hand_yolov8n.pt`
-- `ComfyUI/models/ultralytics/segm/person_yolov8n-seg.pt`
+- `ComfyUI/models/ultralytics/bbox/face_yolov8s.pt`
+- `ComfyUI/models/ultralytics/bbox/hand_yolov8s.pt`
+- `ComfyUI/models/ultralytics/segm/person_yolov8s-seg.pt`
 
 ## License
 

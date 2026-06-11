@@ -524,12 +524,12 @@ python lora_chance_ui.py
 - `manual` ： prompt.toml の語句をユーザが選択した場合
 - `lora_keyword` ： 入力したlora_keywordの場合
 
-## face_yolov8n.pt、hand_yolov8n.pt、person_yolov8n-seg.pt 自動配置
+## face_yolov8s.pt、hand_yolov8s.pt、person_yolov8s-seg.pt 自動配置
 
 以下の補正ファイルは無ければ自動でダウンロードして配置されます。
-- `ComfyUI/models/ultralytics/bbox/face_yolov8n.pt`
-- `ComfyUI/models/ultralytics/bbox/hand_yolov8n.pt`
-- `ComfyUI/models/ultralytics/segm/person_yolov8n-seg.pt`
+- `ComfyUI/models/ultralytics/bbox/face_yolov8s.pt`
+- `ComfyUI/models/ultralytics/bbox/hand_yolov8s.pt`
+- `ComfyUI/models/ultralytics/segm/person_yolov8s-seg.pt`
 
 ## ライセンス
 
