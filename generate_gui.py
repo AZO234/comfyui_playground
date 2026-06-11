@@ -38,6 +38,7 @@ from common import (
     normalize_emphasis,
     pick_n_loras_by_keywords,
 )
+from pngutil import read_text_chunks, write_text_chunks
 
 # tkinterdnd2 (D&D サポート、無くても起動はする)
 try:
@@ -90,6 +91,8 @@ VERSION_BY_DIR = {
     SDXL_CHECKPOINT_DIR: "sdxl",
 }
 DEFAULT_RES = {"sd15": 768, "sdxl": 1024}
+# 「2 人以上 (ワイド)」ON 時の横長キャンバス (W, H)。SDXL は generate.py の many 既定と揃える
+WIDE_RES = {"sd15": (912, 624), "sdxl": (1216, 832)}
 
 
 def _preview_path(safetensors_path: Path) -> Optional[Path]:
@@ -146,8 +149,6 @@ class GenerateGUI:
         self.reference_image_path: Optional[Path] = None
         self._reference_thumb_keep: Optional[ImageTk.PhotoImage] = None
 
-        # 走行中のアップスケールジョブ追跡 (Path → Thread)。同じ画像の二重投入を防ぐ
-        self._upscale_jobs: dict[Path, threading.Thread] = {}
 
         self._gallery_col = 0
         self._gallery_row = 0
@@ -374,16 +375,25 @@ class GenerateGUI:
         ctrl = ttk.Frame(top)
         ctrl.grid(row=row, column=0, columnspan=2, sticky="ew", padx=4, pady=8)
 
-        # 左端: 推論数 / OpenPose / 設定ボタン
-        # 推論数: 0 = 無限 (停止ボタンが押されるまで)、>0 = その枚数で停止する batch
-        ttk.Label(ctrl, text="推論数:").pack(side=tk.LEFT, padx=(4, 2))
+        # 左端: 枚数 / 推論数 / 設定ボタン
+        # 枚数: 0 = 無限 (停止まで)、>0 = その枚数で停止する batch
+        # 推論数: 1 枚あたりの denoising step 数 (= steps)。設定ダイアログの Steps と同じ Var
+        ttk.Label(ctrl, text="枚数:").pack(side=tk.LEFT, padx=(4, 2))
         self.count_var = tk.IntVar(value=0)
         ttk.Spinbox(ctrl, from_=0, to=300, textvariable=self.count_var, width=5).pack(side=tk.LEFT)
-        ttk.Label(ctrl, text="(0=停止まで無限)", foreground="#888").pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Label(ctrl, text="(0=停止まで無限)", foreground="#888").pack(side=tk.LEFT, padx=(2, 8))
 
-        self.openpose_var = tk.BooleanVar(value=True)
-        self.openpose_check = ttk.Checkbutton(ctrl, text="OpenPose", variable=self.openpose_var)
-        self.openpose_check.pack(side=tk.LEFT, padx=(16, 2))
+        # 推論数 (= steps、設定ダイアログとも共有)
+        self.steps_var = tk.IntVar(value=30)
+        ttk.Label(ctrl, text="推論数:").pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Spinbox(ctrl, from_=1, to=200, textvariable=self.steps_var, width=5).pack(side=tk.LEFT)
+
+        # 2 人以上 (ワイド): ON で横長キャンバス (SDXL=1216x832 / SD15=912x624) に切替え、
+        # 複数人物の融合を抑える。OFF は設定ダイアログの幅/高さをそのまま使う
+        self.many_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl, text="2人以上 (ワイド)", variable=self.many_var,
+        ).pack(side=tk.LEFT, padx=(16, 2))
 
         # 「設定」ダイアログ: ポジ/ネガ/CFG/AD補正/Hires Fix/幅/高さ をまとめる
         # 関連 Var は __init__ で生成しておき、ダイアログ widget が textvariable で直接束縛する
@@ -393,6 +403,9 @@ class GenerateGUI:
         # する不具合あり (2026-06-05)。既定 OFF とし、必要時のみ ON。
         self.adetailer_person_var = tk.BooleanVar(value=False)
         self.hires_var = tk.BooleanVar(value=True)
+        # 各 gen 画像を生成直後に Real-ESRGAN x4 で自動 upscale (既定 ON)
+        self.auto_upscale_var = tk.BooleanVar(value=True)
+        self.auto_upscale_style_var = tk.StringVar(value=DEFAULT_UPSCALE_STYLE)
         ttk.Button(ctrl, text="設定…", command=self._open_settings).pack(side=tk.LEFT, padx=(16, 2))
 
         # 右端: 画像生成 / 停止 (pack 順は右から積まれるので 停止→生成 の順で見た目は 生成 停止)
@@ -403,9 +416,9 @@ class GenerateGUI:
         self.generate_btn.pack(side=tk.RIGHT, padx=4)
 
         # 詳細パラメータも「設定」ダイアログに移動 (Var だけ生成しておく)
+        # steps_var は上の ctrl row で先行宣言済 (推論数 Spinbox と共有)
         self.width_var = tk.IntVar(value=DEFAULT_RES["sd15"])
         self.height_var = tk.IntVar(value=DEFAULT_RES["sd15"])
-        self.steps_var = tk.IntVar(value=30)
         self.seed_var = tk.StringVar(value="-1")
         self.sampler_var = tk.StringVar(value="dpmpp_2m")
         self.scheduler_var = tk.StringVar(value="karras")
@@ -549,14 +562,6 @@ class GenerateGUI:
                 self.cn_listbox.selection_clear(0, tk.END)
                 self.selected_controlnet_index = -1
 
-        # OpenPose も ControlNet 系なので SD15 では無効化 (4_3 は SDXL のみ)
-        if hasattr(self, "openpose_check"):
-            if version == "sd15":
-                self.openpose_var.set(False)
-                self.openpose_check.state(["disabled"])
-            else:
-                self.openpose_check.state(["!disabled"])
-
         # 解像度を版に合わせて自動セット (ユーザが弄った後は次の checkpoint 切替で上書きされる点に注意)
         if hasattr(self, "width_var"):
             self.width_var.set(DEFAULT_RES[version])
@@ -684,15 +689,9 @@ class GenerateGUI:
     def _gen_alive(self) -> bool:
         return bool(self._worker_thread and self._worker_thread.is_alive())
 
-    def _any_upscale_alive(self) -> bool:
-        return any(t.is_alive() for t in self._upscale_jobs.values())
-
     # ---------- 生成 ---------- #
     def _on_generate_clicked(self) -> None:
         if self._gen_alive():
-            return
-        if self._any_upscale_alive():
-            messagebox.showinfo("実行中", "アップスケール処理中です。完了まで待ってください。")
             return
         ckpt_random = bool(self.checkpoint_random_var.get())
         ckpt = self._current_checkpoint()
@@ -766,9 +765,9 @@ class GenerateGUI:
             "adetailer": bool(self.adetailer_var.get()),
             "adetailer_person": bool(self.adetailer_person_var.get()),
             "hires_fix": bool(self.hires_var.get()),
-            "openpose": bool(self.openpose_var.get()),
             "width": int(self.width_var.get()),
             "height": int(self.height_var.get()),
+            "many": bool(self.many_var.get()),
             "steps": int(self.steps_var.get()),
             "sampler": self.sampler_var.get(),
             "scheduler": self.scheduler_var.get(),
@@ -780,6 +779,8 @@ class GenerateGUI:
             "controlnet_mode": ref_mode,
             "controlnet_strength": ref_strength,
             "reference_image_path": ref_path,
+            "auto_upscale": bool(self.auto_upscale_var.get()),
+            "auto_upscale_style": str(self.auto_upscale_style_var.get() or DEFAULT_UPSCALE_STYLE),
         }
 
         self._stop_flag = False
@@ -810,10 +811,10 @@ class GenerateGUI:
         return {
             "prompt":            prompt_body,
             "count":             int(self.count_var.get()),
-            "openpose":          bool(self.openpose_var.get()),
             "checkpoint_random": bool(self.checkpoint_random_var.get()),
             "arch_filter":       str(self.arch_filter_var.get()),
             "lora_keywords":     self.lora_kw_var.get() or "",
+            "many":              bool(self.many_var.get()),
             "positive":          self.positive_value,
             "negative":          self.negative_value,
             # 生成パラメータ
@@ -832,6 +833,8 @@ class GenerateGUI:
             "hires_scale":    float(self.hires_scale_var.get()),
             "hires_denoise":  float(self.hires_denoise_var.get()),
             "hires_steps":    int(self.hires_steps_var.get()),
+            "auto_upscale":       bool(self.auto_upscale_var.get()),
+            "auto_upscale_style": str(self.auto_upscale_style_var.get()),
         }
 
     def _save_settings(self) -> None:
@@ -878,12 +881,12 @@ class GenerateGUI:
             self.negative_value = str(data["negative"])
 
         _try(self.count_var.set,        "count",         int)
-        _try(self.openpose_var.set,     "openpose",      bool)
         # 版フィルタを先に復元 → combobox を絞った状態で他の Var を入れる
         if "arch_filter" in data and str(data["arch_filter"]) in ("sd15", "sdxl"):
             self.arch_filter_var.set(str(data["arch_filter"]))
             self._populate_checkpoint_combo()
         _try(self.checkpoint_random_var.set, "checkpoint_random", bool)
+        _try(self.many_var.set,              "many",              bool)
         # ランダムチェック復元後に combobox の disabled 状態を反映
         self._on_checkpoint_random_toggle()
         if "lora_keywords" in data:
@@ -905,6 +908,8 @@ class GenerateGUI:
         _try(self.hires_scale_var.set,  "hires_scale",   float)
         _try(self.hires_denoise_var.set,"hires_denoise", float)
         _try(self.hires_steps_var.set,  "hires_steps",   int)
+        _try(self.auto_upscale_var.set,       "auto_upscale",       bool)
+        _try(self.auto_upscale_style_var.set, "auto_upscale_style", str)
 
     def _on_app_close(self) -> None:
         self._save_settings()
@@ -1005,6 +1010,17 @@ class GenerateGUI:
         ttk.Label(boost_frame, text="Hires Steps:").grid(row=1, column=4, sticky="e", padx=(12, 2))
         ttk.Spinbox(boost_frame, from_=1, to=100,
                      textvariable=self.hires_steps_var, width=6).grid(row=1, column=5, sticky="w")
+
+        # 自動アップスケール (Real-ESRGAN x4)
+        ttk.Checkbutton(
+            boost_frame, text="アップスケール (Real-ESRGAN x4)",
+            variable=self.auto_upscale_var,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 2))
+        ttk.Label(boost_frame, text="スタイル:").grid(row=2, column=3, sticky="e", padx=(12, 2))
+        ttk.Combobox(
+            boost_frame, textvariable=self.auto_upscale_style_var, state="readonly",
+            values=list(UPSCALE_MODELS.keys()), width=8,
+        ).grid(row=2, column=4, columnspan=2, sticky="w")
 
         # ---- 閉じるボタン ----
         btn_frame = ttk.Frame(win)
@@ -1142,6 +1158,13 @@ class GenerateGUI:
             else:
                 this_loras = []
 
+            # 2 人以上 (ワイド) ON → 版に応じた横長プリセットで base 解像度を上書き
+            # (人物融合を抑える。OFF は設定ダイアログの width/height をそのまま使う)
+            if params.get("many"):
+                this_w, this_h = WIDE_RES.get(this_version, (base_w, base_h))
+            else:
+                this_w, this_h = base_w, base_h
+
             ckpt_label = this_ckpt.stem if ckpt_random else this_ckpt.name
             # count=0 (無限) は分母なし。count>0 のときだけ "/N" を出す
             progress = f"{i+1}/{count}" if count > 0 else f"{i+1}"
@@ -1160,8 +1183,8 @@ class GenerateGUI:
                 seed=seed,
                 steps=steps,
                 cfg=cfg,
-                width=base_w,
-                height=base_h,
+                width=this_w,
+                height=this_h,
                 sampler_name=sampler,
                 scheduler=scheduler,
                 loras=this_loras or None,
@@ -1192,8 +1215,8 @@ class GenerateGUI:
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
             out_path = GENERATED_DIR / f"gui_{ts}_{i+1:04d}.png"
-            final_w = int(base_w * hires_scale) if params["hires_fix"] else base_w
-            final_h = int(base_h * hires_scale) if params["hires_fix"] else base_h
+            final_w = int(this_w * hires_scale) if params["hires_fix"] else this_w
+            final_h = int(this_h * hires_scale) if params["hires_fix"] else this_h
 
             try:
                 save_with_a1111_metadata(
@@ -1211,7 +1234,39 @@ class GenerateGUI:
                 self._result_queue.put({"error": f"保存失敗 ({progress}): {e}"})
                 return
 
-            self._result_queue.put({"image": out_path, "iter": i + 1, "total": count})
+            # 自動アップスケール: gen ループ内で同期実行 (ComfyUI への submit を直列化)
+            # auto_upscale 時は upscale 完了画像だけギャラリーに追加し、gen は status だけ
+            auto_up = bool(params.get("auto_upscale"))
+            if auto_up:
+                self._result_queue.put({
+                    "status": f"生成完了 ({progress}): {out_path.name} → アップスケール中…",
+                })
+            else:
+                self._result_queue.put({
+                    "image": out_path, "iter": i + 1, "total": count,
+                })
+
+            if auto_up:
+                try:
+                    up_path = self._do_upscale_sync(
+                        out_path,
+                        params.get("auto_upscale_style") or DEFAULT_UPSCALE_STYLE,
+                        client_id=self._client_id,
+                    )
+                    if up_path is not None:
+                        self._result_queue.put({
+                            "image": up_path, "iter": i + 1, "total": count,
+                            "job": "upscale_inline",
+                        })
+                except Exception as e:
+                    # アップスケール失敗時は gen 画像をギャラリーに残す
+                    self._result_queue.put({
+                        "status": f"アップスケール失敗 ({out_path.name}): {e}",
+                    })
+                    self._result_queue.put({
+                        "image": out_path, "iter": i + 1, "total": count,
+                    })
+
             i += 1
 
         self._result_queue.put({"done": True})
@@ -1230,9 +1285,9 @@ class GenerateGUI:
         self.root.after(150, self._poll_queue)
 
     def _refresh_busy_state(self) -> None:
-        """gen ボタンの enable/disable を gen + upscale ジョブの走行状態に合わせて反映。
-        どちらかが走っていれば disable、両方止まっていれば normal。"""
-        if self._gen_alive() or self._any_upscale_alive():
+        """gen ボタンの enable/disable を gen 走行状態に合わせて反映。
+        gen 走行中は disable、止まっていれば normal。"""
+        if self._gen_alive():
             self.generate_btn.configure(state=tk.DISABLED)
         else:
             self.generate_btn.configure(state=tk.NORMAL)
@@ -1322,24 +1377,6 @@ class GenerateGUI:
     def _show_gallery_menu(self, event, path: Path, cell: tk.Widget) -> None:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="削除", command=lambda: self._delete_gallery_item(path, cell))
-
-        # 画像生成中は upscale を選べない (ComfyUI 共有のため)
-        upscale_state = tk.DISABLED if self._gen_alive() else tk.NORMAL
-        upscale_label = "アップスケール (Real-ESRGAN x4)"
-        if upscale_state == tk.DISABLED:
-            upscale_label += " — 画像生成中で無効"
-
-        upscale_menu = tk.Menu(menu, tearoff=0)
-        upscale_menu.add_command(
-            label="アニメ (既定)",
-            command=lambda: self._upscale_gallery_item(path, "anime"),
-        )
-        upscale_menu.add_command(
-            label="実写",
-            command=lambda: self._upscale_gallery_item(path, "real"),
-        )
-        menu.add_cascade(label=upscale_label, menu=upscale_menu, state=upscale_state)
-
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1360,91 +1397,61 @@ class GenerateGUI:
             pass
         self.status_var.set(f"削除: {path.name}")
 
-    def _upscale_gallery_item(self, path: Path, style: str = DEFAULT_UPSCALE_STYLE) -> None:
-        if not path.exists():
-            messagebox.showerror("エラー", f"{path.name} が見つかりません")
-            return
-        # 画像生成中は upscale を受け付けない (ComfyUI を共有してるので片方ずつ)
-        if self._gen_alive():
-            messagebox.showinfo("実行中", "画像生成中です。完了まで待ってください。")
-            return
-        # 同じ画像の二重投入を避ける (右クリック連打や、まだ完了してない再投入)
-        prev = self._upscale_jobs.get(path)
-        if prev and prev.is_alive():
-            self.status_var.set(f"アップスケール既に走行中: {path.name}")
-            return
-        # 別スレッドで ComfyUI に upscale 専用 workflow を投入
-        th = threading.Thread(target=self._upscale_worker, args=(path, style), daemon=True)
-        self._upscale_jobs[path] = th
-        th.start()
-        # 並行アップスケールが走っている間は生成ボタンを無効化
-        self.generate_btn.configure(state=tk.DISABLED)
-        self.status_var.set(f"アップスケール投入 ({style}): {path.name}")
-
-    def _upscale_worker(self, path: Path, style: str = DEFAULT_UPSCALE_STYLE) -> None:
-        # gen worker と並行可能性があるので
-        #   ① 自前の client_id を持つ (WebSocket 多重サブスクライブ衝突を回避)
-        #   ② メッセージに job="upscale" タグを付ける (gen のボタン状態を巻き込まないように)
-        upscale_client_id = uuid.uuid4().hex
+    def _do_upscale_sync(
+        self, path: Path, style: str, client_id: str,
+    ) -> Optional[Path]:
+        """1 枚を Real-ESRGAN x4 アップスケールして 5_2_upscaled に保存。
+        失敗時は raise (caller がメッセージ処理)。worker (gen ループ内同期) で利用。
+        ソース PNG (path) に A1111 parameters chunk があれば upscale 後に複写
+        (Size フィールドのみ新解像度に書き換え)。"""
         model_name = UPSCALE_MODELS.get(style, UPSCALE_MODELS[DEFAULT_UPSCALE_STYLE])
-        try:
-            write_extra_model_paths()
-            ensure_comfyui_arch("cuda",
-                                  force_restart=not self._server_verified)
-            self._server_verified = True
-            # 必要なら upscale モデルを公式 release から DL (~17-64 MB)
-            self._result_queue.put({
-                "status": f"アップスケールモデル確認中: {model_name}",
-                "job": "upscale",
-            })
-            resolved = ensure_upscale_model(model_name)
-            if not resolved:
-                self._result_queue.put({
-                    "error": f"アップスケールモデル {model_name} を取得できません",
-                    "job": "upscale",
-                })
-                return
-            model_name = resolved
-            uploaded = upload_image_to_comfyui(path)
-            workflow = {
-                "1": {"class_type": "LoadImage", "inputs": {"image": uploaded}},
-                "2": {"class_type": "UpscaleModelLoader",
-                      "inputs": {"model_name": model_name}},
-                "3": {"class_type": "ImageUpscaleWithModel",
-                      "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
-                "7": {"class_type": "SaveImage",
-                      "inputs": {"images": ["3", 0], "filename_prefix": f"gui_upscale_{style}"}},
-            }
-            img_bytes, _info, _ = _submit_and_fetch(workflow, upscale_client_id)
-        except Exception as e:
-            self._result_queue.put({
-                "error": f"アップスケール失敗 ({path.name}): {e}",
-                "job": "upscale",
-            })
-            return
+        resolved = ensure_upscale_model(model_name)
+        if not resolved:
+            raise RuntimeError(f"アップスケールモデル {model_name} を取得できません")
+        model_name = resolved
+        uploaded = upload_image_to_comfyui(path)
+        workflow = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": uploaded}},
+            "2": {"class_type": "UpscaleModelLoader",
+                  "inputs": {"model_name": model_name}},
+            "3": {"class_type": "ImageUpscaleWithModel",
+                  "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+            "7": {"class_type": "SaveImage",
+                  "inputs": {"images": ["3", 0],
+                             "filename_prefix": f"gui_upscale_{style}"}},
+        }
+        img_bytes, _info, _ = _submit_and_fetch(workflow, client_id)
         if img_bytes is None:
-            self._result_queue.put({
-                "status": f"アップスケール結果未取得: {path.name}",
-                "job": "upscale",
-            })
-            return
+            return None
         UPSCALED_DIR.mkdir(exist_ok=True)
         out_path = UPSCALED_DIR / path.name
+        out_path.write_bytes(img_bytes)
+
+        # ソース PNG の A1111 parameters chunk を複写。Size だけ新解像度に書き換える
         try:
-            out_path.write_bytes(img_bytes)
-        except Exception as e:
-            self._result_queue.put({
-                "error": f"アップスケール保存失敗: {e}",
-                "job": "upscale",
-            })
-            return
-        self._result_queue.put({
-            "image": out_path, "iter": 0, "total": 0, "job": "upscale",
-        })
-        self._result_queue.put({
-            "status": f"アップスケール完了: {out_path.name}",
-            "job": "upscale",
-        })
+            src_chunks = read_text_chunks(path)
+        except Exception:
+            src_chunks = {}
+        if src_chunks:
+            try:
+                from PIL import Image as _Image
+                with _Image.open(out_path) as _im:
+                    new_w, new_h = _im.size
+                params_text = src_chunks.get("parameters")
+                if params_text:
+                    # "Size: WxH" を書き換え (見つからなければ末尾追加)
+                    import re
+                    new_size = f"Size: {new_w}x{new_h}"
+                    if re.search(r"Size:\s*\d+x\d+", params_text):
+                        params_text = re.sub(r"Size:\s*\d+x\d+", new_size, params_text)
+                    else:
+                        params_text = f"{params_text}, {new_size}"
+                    src_chunks["parameters"] = params_text
+                write_text_chunks(out_path, src_chunks)
+            except Exception as e:
+                # メタ複写失敗は致命的ではない (画像本体は保存済み)
+                print(f"[upscale] metadata copy failed: {e}", flush=True)
+        return out_path
 
     def _on_gallery_wheel(self, event) -> str:
         """ホイール delta±120/notch をスクロール単位 (units) に変換して Canvas を縦スクロール。"""
@@ -1468,21 +1475,58 @@ class GenerateGUI:
 
         top = tk.Toplevel(self.root)
         self._modal_win = top
-        top.title(path.name)
         try:
-            img = Image.open(path)
+            orig_img = Image.open(path)
         except Exception as e:
+            top.title(path.name)
             tk.Label(top, text=f"open error: {e}").pack()
             return
-        sw = self.root.winfo_screenwidth() - 80
-        sh = self.root.winfo_screenheight() - 140
-        img.thumbnail((sw, sh))
-        photo = ImageTk.PhotoImage(img)
-        lbl = tk.Label(top, image=photo)
-        lbl.image = photo
-        lbl.pack()
 
-        # ←/→ でナビ: ギャラリー内位置を index で取得 → ±1、リストが空または対象外なら no-op
+        ow, oh = orig_img.size
+        sw = self.root.winfo_screenwidth() - 80
+        sh = self.root.winfo_screenheight() - 160  # title バー分余裕
+        # 初期スケール = 画面に収まるサイズ (原寸=100%。原寸が画面より小さければ 100%)
+        init_scale = min(sw / ow, sh / oh, 1.0)
+        state = {"scale": init_scale}
+
+        # Canvas + 2 軸スクロール (拡大時に画像が画面外にはみ出るため)
+        body = tk.Frame(top)
+        body.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(body, bg="#222222", highlightthickness=0)
+        hsb = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=canvas.xview)
+        vsb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        image_id = canvas.create_image(0, 0, anchor="nw")
+        photo_holder = {"photo": None}  # GC 回避用
+
+        def _render() -> None:
+            scale = max(0.05, min(8.0, state["scale"]))
+            state["scale"] = scale
+            new_w = max(1, int(ow * scale))
+            new_h = max(1, int(oh * scale))
+            try:
+                resized = orig_img.resize((new_w, new_h), Image.LANCZOS)
+            except Exception:
+                resized = orig_img
+            photo = ImageTk.PhotoImage(resized)
+            photo_holder["photo"] = photo
+            canvas.itemconfigure(image_id, image=photo)
+            canvas.configure(scrollregion=(0, 0, new_w, new_h))
+            top.title(f"{path.name}  —  {int(scale * 100)}%")
+
+        _render()
+
+        # Modal 初期サイズ: フィット時のサイズ + scrollbar 分
+        init_w = min(sw, int(ow * init_scale) + 24)
+        init_h = min(sh, int(oh * init_scale) + 48)
+        top.geometry(f"{init_w}x{init_h}")
+
+        # ←/→ でナビ
         def _navigate(delta: int) -> None:
             if path not in self._gallery_paths or len(self._gallery_paths) < 2:
                 return
@@ -1490,10 +1534,41 @@ class GenerateGUI:
             new_idx = (idx + delta) % len(self._gallery_paths)
             self._show_modal(self._gallery_paths[new_idx])
 
+        # Ctrl+ホイール で拡大縮小 (event.state & 0x4 が Ctrl)。1 notch で 1.1x
+        def _on_wheel(event) -> str:
+            if event.state & 0x4:  # Ctrl
+                factor = 1.1 if event.delta > 0 else (1 / 1.1)
+                state["scale"] *= factor
+                _render()
+                return "break"
+            # Ctrl 無しは縦スクロールに振る (拡大時の画像内移動)
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
         top.bind("<Escape>", lambda e: top.destroy())
-        top.bind("<Button-1>", lambda e: top.destroy())
+        # クリック閉じは中で拡大表示のとき扱いづらいので右ボタンを閉じる用に振る
+        top.bind("<Button-3>", lambda e: top.destroy())
         top.bind("<Left>",  lambda e: _navigate(-1))
         top.bind("<Right>", lambda e: _navigate(+1))
+        canvas.bind("<MouseWheel>", _on_wheel)
+        top.bind("<MouseWheel>", _on_wheel)
+
+        # ホイールプッシュ (ミドルボタン) + 移動で画像をパン (Canvas.scan_mark/scan_dragto)
+        def _pan_start(event) -> None:
+            canvas.config(cursor="fleur")
+            canvas.scan_mark(event.x, event.y)
+
+        def _pan_move(event) -> None:
+            # gain=1 でマウスドラッグ量とパン量が 1:1
+            canvas.scan_dragto(event.x, event.y, gain=1)
+
+        def _pan_end(event) -> None:
+            canvas.config(cursor="")
+
+        canvas.bind("<ButtonPress-2>", _pan_start)
+        canvas.bind("<B2-Motion>", _pan_move)
+        canvas.bind("<ButtonRelease-2>", _pan_end)
+
         # destroy 時に self._modal_win の参照を片付ける
         top.bind("<Destroy>", lambda e: self._on_modal_destroyed(e, top))
         top.focus_set()

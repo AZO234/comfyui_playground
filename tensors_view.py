@@ -62,9 +62,13 @@ _FAMILIES_CACHE: Optional[dict] = None
 
 
 def _is_pony_name(stem: str) -> bool:
-    """ファイル名から Pony 系かを推定。generate.py の同名関数と同一規則。"""
+    """ファイル名から Pony 系かを推定。generate.py の同名関数と同一規則
+    (pony / pdxl / pny / pxl / xlp を含む)。"""
     s = stem.lower()
-    return ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s)
+    return (
+        ("pony" in s) or ("pdxl" in s) or ("pny" in s)
+        or ("pxl" in s) or ("xlp" in s)
+    )
 
 
 def _load_families() -> dict:

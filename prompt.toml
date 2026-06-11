@@ -37,7 +37,7 @@
 # 1 つを均等ランダム抽選
 who = [
     # plane
-    ["**1girl, 2girls**", 20, false, false, false, true, ""],
+    ["**1girl or 2girls**", 20, false, false, false, true, ""],
 ]
 
 # 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]

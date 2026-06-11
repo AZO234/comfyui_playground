@@ -464,7 +464,7 @@ def build_workflow_txt2img(
     adetailer_face_model: str = "bbox/face_yolov8n.pt",
     adetailer_hand_model: Optional[str] = "bbox/hand_yolov8n.pt",
     adetailer_person_model: Optional[str] = "segm/person_yolov8n-seg.pt",
-    adetailer_denoise: float = 0.5,
+    adetailer_denoise: float = 0.35,
     adetailer_person_denoise: float = 0.3,
     adetailer_steps: int = 30,
     hires_fix: bool = False,
@@ -686,12 +686,18 @@ def build_workflow_txt2img(
                 "positive": ksampler_positive_ref,
                 "negative": ksampler_negative_ref,
                 "denoise": float(denoise),
-                "feather": 5,
+                # feather: 元 5 → 32 (px)。VAE 往復で生じる微小色シフトが seam で出ないように
+                # 合成境界を広げてブレンドする (face/hand ADetailer の「茶色フィルム」問題 2026-06-08)
+                "feather": 32,
                 "noise_mask": True,
                 "force_inpaint": True,
                 "bbox_threshold": 0.5,
-                "bbox_dilation": 10,
-                "bbox_crop_factor": 3.0,
+                # bbox_dilation: 元 10 → 32 (px、Mask Padding 相当)。インペイント mask を外側に
+                # 拡げて、feather とあわせて seam を完全にブレンド領域に取り込む (2026-06-08)
+                "bbox_dilation": 32,
+                # bbox_crop_factor: 元 3.0 → 1.5。顔/手の周辺余白を狭めて合成領域を絞る
+                # (元 3.0 だと顔 bbox が肩〜胸まで覆い、複数人で領域重畳 → 茶色化を増幅していた)
+                "bbox_crop_factor": 1.5,
                 "sam_detection_hint": "center-1",
                 "sam_dilation": 0,
                 "sam_threshold": 0.93,
@@ -877,9 +883,12 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
 
     - fixed_name 指定 → そのまま返す
     - force_openpose=True → stem に 'pose'/'openpose' を含むもの から強制抽選
+    - force_openpose=False の auto pick (style/mix) では **openpose 系を除外**:
+      OpenPose は --pose 明示時のみ動かす方針 (既定 OFF)。src_png のみ与えて偶発的に
+      openpose CN が選ばれないように、候補から落とす (2026-06-08)
     - style == "anime" → ファイル名 stem に 'anime' を含むもの からランダム
     - style == "real"  → ファイル名 stem に 'real' を含むもの からランダム
-    - style == "mix" or "" → 全 ControlNet からランダム
+    - style == "mix" or "" → 全 ControlNet からランダム (openpose 除外後)
     - 候補ゼロ → None
     """
     if not CONTROLNET_DIR.exists():
@@ -893,10 +902,12 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
                 return c
         raise SystemExit(L(f"ControlNet が見つかりません: {fixed_name}", f"ControlNet not found: {fixed_name}"))
 
+    def _is_openpose(c: Path) -> bool:
+        s = c.stem.lower()
+        return "openpose" in s or "_pose" in s or s.endswith("pose")
+
     if force_openpose:
-        matched = [c for c in candidates
-                   if "openpose" in c.stem.lower() or "_pose" in c.stem.lower()
-                   or c.stem.lower().endswith("pose")]
+        matched = [c for c in candidates if _is_openpose(c)]
         if not matched:
             raise SystemExit(
                 L("--pose 指定だが 4_3_SDXL_ControlNet/ に openpose 系 ControlNet が見つかりません "
@@ -905,6 +916,11 @@ def pick_controlnet(style: str, fixed_name: Optional[str] = None,
                   "(place a file with 'openpose' / '_pose' / ending in 'pose' in its stem)")
             )
         return random.choice(matched)
+
+    # auto pick: OpenPose は --pose 明示時のみという方針なので候補から除外
+    candidates = [c for c in candidates if not _is_openpose(c)]
+    if not candidates:
+        return None
 
     s = (style or "").lower()
     if s == "anime":
@@ -1188,10 +1204,13 @@ def checkpoint_version(path: Path) -> str:
 
 
 def _is_pony_name(stem: str) -> bool:
-    """ファイル名から Pony 系かを推定 (pony / pdxl / pny / pxl を含む)。
-    ユーザは収集時に pony/pny/pxl を意図的に付与 (無記載=オリジナル名)。"""
+    """ファイル名から Pony 系かを推定 (pony / pdxl / pny / pxl / xlp を含む)。
+    ユーザは収集時に pony/pny/pxl/xlp を意図的に付与 (無記載=オリジナル名)。"""
     s = stem.lower()
-    return ("pony" in s) or ("pdxl" in s) or ("pny" in s) or ("pxl" in s)
+    return (
+        ("pony" in s) or ("pdxl" in s) or ("pny" in s)
+        or ("pxl" in s) or ("xlp" in s)
+    )
 
 
 def checkpoint_is_pony(checkpoint_path: Path, checkpoint_data: dict) -> bool:
@@ -1578,8 +1597,10 @@ def main() -> None:
                     help=L("--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)",
                            "controlnet_conditioning_scale when --pose is specified (default 1.0, stronger works better for skeleton)"))
     ap.add_argument("--gear", choices=["low", "high"], default="high",
-                    help=L("low=ラフ (steps 50) / high=本番 (steps 100、既定)",
-                           "low=rough (steps 50) / high=production (steps 100, default)"))
+                    help=L("low=ラフ/SD15 本気 (steps 30、SD15 は高 step でつぶれるので低め) / "
+                           "high=本番 (steps 50、既定)",
+                           "low=rough/SD15 production (steps 30, SD15 collapses at high steps) / "
+                           "high=production (steps 50, default)"))
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
                     help=L("ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)",
                            "ComfyUI device selection (informational in Phase 1; determined at ComfyUI startup)"))
@@ -1655,9 +1676,9 @@ def main() -> None:
                            "足/脚の奇形補正に使用、denoise を低めで構造維持",
                            "ADetailer full-body detection model (empty string to disable, default person_yolov8n-seg). "
                            "Used to correct leg/foot artifacts; lower denoise to preserve structure"))
-    ap.add_argument("--adetailer-denoise", type=float, default=0.5,
-                    help=L("ADetailer (face/hand) inpaint strength (既定 0.5)",
-                           "ADetailer (face/hand) inpaint strength (default 0.5)"))
+    ap.add_argument("--adetailer-denoise", type=float, default=0.35,
+                    help=L("ADetailer (face/hand) inpaint strength (既定 0.35、低めで合成 seam 防止)",
+                           "ADetailer (face/hand) inpaint strength (default 0.35, lower to prevent composite seam)"))
     ap.add_argument("--adetailer-person-denoise", type=float, default=0.3,
                     help=L("ADetailer person inpaint strength (既定 0.3、低めで構造維持)",
                            "ADetailer person inpaint strength (default 0.3, lower to preserve structure)"))
@@ -1739,7 +1760,7 @@ def main() -> None:
         print(L(f"[quality prefix] family=pony の checkpoint にのみ Pony score を自動前置",
                 f"[quality prefix] auto-prepending Pony score only for family=pony checkpoints"))
 
-    steps = {"low": 50, "high": 100}[args.gear]
+    steps = {"low": 30, "high": 50}[args.gear]
 
     # 入力ソースから mode を確定 (UX): --png=画質アップ refine / --png-sentence=PNG文章生成 / --sentence=文章
     #   --png は最優先 (refine)。--png-sentence は png(文章) だが --prompt original 明示は尊重。
