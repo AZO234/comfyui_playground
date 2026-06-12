@@ -29,13 +29,12 @@ import base64
 import io
 import json
 import math
-import os
 import queue
 import struct
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 

@@ -1,50 +1,37 @@
+# comfyui_playground 直接依存のみ。ComfyUI 本体・Impact-Pack・Impact-Subpack の依存は
+# それぞれの requirements.txt を別途インストールする方針 (重複させない、README 参照)。
+#
 # PyTorch は環境に合わせて個別にインストールする (この requirements には含めない)
 #   CPU 版 :  pip install --index-url https://download.pytorch.org/whl/cpu  torch torchvision
 #   CUDA12 :  pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
 #   CUDA13 :  pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # 参照: https://pytorch.org/get-started/locally/
 
-# Diffusers / Transformers (生成・LoRA 学習・Latent Upscale 全般)
-# transformers 5.x は CLIPTextModel.text_model の API が変わり diffusers 0.38 の from_single_file が壊れる
-# (Cannot find 'text_model' attribute) ため、当面 4.x 系に固定
-diffusers
-transformers>=4.46,<5.0
-accelerate
+# safetensors I/O (common.save_file)
 safetensors
-huggingface-hub
-peft
 
-# 画像 / 数値 / プログレス
+# 画像 (common / pngutil / gallery / generate_gui)
 Pillow
-numpy
-tqdm
 
-# 設定ファイル (Python 3.11+ は tomllib 標準。互換用に tomli/tomli-w)
+# 設定ファイル (Python 3.11+ は tomllib 標準。3.10 互換用に tomli/tomli-w)
 tomli
 tomli-w
 
-# プロンプト重み付けパーサ ((word:1.3) 構文を embeddings に変換)
-# normalize_emphasis が `**word**` → `(word:1.3)` 形式で吐き、compel が CLIP 埋め込みに重みを適用
-compel
+# ADetailer YOLO + SDXL 安定 VAE の自動 DL (generate.py)
+huggingface-hub
 
-# タグ付け (WD14 tagger を ONNX で実行)
-# onnxruntime-gpu は CPU バックエンドも含む上位互換。GPU 無し環境では CPUExecutionProvider に自動フォールバック
-onnxruntime-gpu
-
-# 対話 TUI (lora_chance_ui.py で矢印+Space 選択を出すために使用)
-# prompt_toolkit ベース、軽量。
-questionary
-
-# ComfyUI HTTP API への WebSocket 接続 (進捗ストリーミング)
-websocket-client
-
-# ComfyUI プロセスの kill+restart (--arch cpu/cuda 切替時)
-psutil
-
-# 画像アップロード (multipart POST)
-# ComfyUI 本体が依存しているため同 venv なら既にあるが、明示する
+# ComfyUI HTTP API への multipart POST 画像アップロード (generate.py)
 requests
 
-# generate_gui.py のリファレンス画像ドラッグ&ドロップ (Tkinter には D&D 標準が無いので追加)
-# 無くても GUI 起動はする (D&D 機能だけ no-op になる)
+# ComfyUI HTTP API への WebSocket 進捗ストリーミング (generate.py)
+websocket-client
+
+# ComfyUI プロセスの kill+restart (generate.py --arch cpu/cuda 切替時)
+psutil
+
+# 対話 TUI (lora_chance_ui.py の矢印+Space 多選択)
+questionary
+
+# generate_gui.py のリファレンス画像ドラッグ&ドロップ (Tkinter に D&D 標準が無いので追加)
+# 無くても GUI 起動はする (D&D だけ no-op になる)
 tkinterdnd2

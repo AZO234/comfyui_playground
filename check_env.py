@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """check_env.py - 学習/生成に必要な環境を一括チェックする。
 
-torch+cuda、cuDNN、GPU、AMP 対応、onnxruntime providers、主要パッケージのバージョン、
-そして簡単なスモークテスト (CUDA matmul, onnxruntime セッション作成) までまとめて表示する。
+torch+cuda、cuDNN、GPU、AMP 対応、onnxruntime providers、主要パッケージのバージョンと
+簡単な CUDA matmul スモークテストをまとめて表示する。
 
 問題の切り分けに使う。CUDA が動かない時はここで原因がほぼ特定できる。
 """
@@ -14,8 +14,6 @@ import platform
 import sys
 import traceback
 from pathlib import Path
-
-from i18n import L  # コンソール出力の言語切替 (英/日)。i18n は torch 非依存なので遅延 import を壊さない
 
 
 def section(title: str) -> None:
@@ -72,26 +70,6 @@ def main() -> None:
         import onnxruntime as ort
         kv("onnxruntime", ort.__version__)
         kv("available_providers", ort.get_available_providers())
-        # WD14 モデルが HF キャッシュにあれば実セッションでロードを検証する
-        # (tagger.py で一度動かしてあれば自動的にキャッシュされている)
-        try:
-            from huggingface_hub import try_to_load_from_cache
-            cached = try_to_load_from_cache("SmilingWolf/wd-v1-4-moat-tagger-v2", "model.onnx")
-        except Exception:
-            cached = None
-        if cached and Path(cached).is_file():
-            providers = []
-            if "CUDAExecutionProvider" in ort.get_available_providers():
-                providers.append("CUDAExecutionProvider")
-            providers.append("CPUExecutionProvider")
-            try:
-                sess = ort.InferenceSession(str(cached), providers=providers)
-                kv("session_smoke_test", f"OK (active: {sess.get_providers()})")
-            except Exception as e:
-                kv("session_smoke_test", f"FAIL: {e}")
-        else:
-            kv("session_smoke_test", L("SKIP (WD14 が HF キャッシュ未取得。tagger.py を一度走らせると検証可能)",
-                                       "SKIP (WD14 not in HF cache; run tagger.py once to enable this check)"))
     except Exception as e:
         kv("onnxruntime", f"NOT IMPORTABLE: {e}")
 

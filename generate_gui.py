@@ -33,8 +33,12 @@ except ImportError:
     ImageTk = None
 
 from common import (
+    _parse_keyword_clauses,
+    _text_matches_clauses,
     build_lora_corpus,
+    build_prompt,
     load_lora_params,
+    load_prompt_config,
     normalize_emphasis,
     pick_n_loras_by_keywords,
 )
@@ -143,6 +147,7 @@ class GenerateGUI:
         self.loras_sdxl: list[Path] = []
         self.controlnets: list[Path] = []
         self.current_loras: list[Path] = []
+        self._lora_params_cache: Optional[dict] = None  # LoRA_param.toml の遅延キャッシュ (kw ハイライト用)
         self.selected_lora_indices: set[int] = set()
         self.selected_controlnet_index: int = -1
 
@@ -193,7 +198,8 @@ class GenerateGUI:
         )
         self.checkpoint_random_check.grid(row=0, column=1, sticky="w", padx=(0, 8))
 
-        # 版フィルタ (SD15/SDXL のラジオ)。combobox の表示を絞り込み、ランダム時もこの版から抽選
+        # 版フィルタ (SDXL / SD15 / 混合 のラジオ)。combobox の表示を絞り込み、ランダム時もこの版から抽選
+        # 混合 = 両 dir を統合してリストする (ランダム時は両版から平等抽選、ckpt_random=true 用)
         arch_frame = ttk.Frame(ckpt_frame)
         arch_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
         self.arch_filter_var = tk.StringVar(value="sdxl")
@@ -203,6 +209,10 @@ class GenerateGUI:
         ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Radiobutton(
             arch_frame, text="SD15", value="sd15", variable=self.arch_filter_var,
+            command=self._on_arch_filter_change,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(
+            arch_frame, text="混合", value="mix", variable=self.arch_filter_var,
             command=self._on_arch_filter_change,
         ).pack(side=tk.LEFT)
 
@@ -238,9 +248,11 @@ class GenerateGUI:
         self.lora_kw_entry.grid(row=0, column=0, sticky="ew")
         ttk.Label(
             lora_kw_frame,
-            text="(カンマ区切り、手動選択が空のとき毎枚抽選)",
+            text="(カンマ区切り、手動選択が空のとき毎枚抽選。候補は LoRA 一覧で赤背景表示)",
             foreground="#888",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        # キーワード変更 → LoRA listbox の候補ハイライトを更新
+        self.lora_kw_var.trace_add("write", lambda *_: self._refresh_lora_candidate_highlight())
 
         row += 1
         ttk.Label(top, text="LoRA (Ctrl/Shiftクリックで複数選択):").grid(
@@ -348,6 +360,21 @@ class GenerateGUI:
             text="(OpenPose=ポーズのみ / Depth=視点維持 / Canny/SoftEdge=輪郭維持)",
             foreground="#888", wraplength=320,
         ).grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
+
+        # プロンプト入力モード: 自由記載 (テキスト欄を使う) / prompt.toml (毎枚 build_prompt 自動)
+        row += 1
+        ttk.Label(top, text="プロンプト入力:").grid(row=row, column=0, sticky="ne", padx=4, pady=4)
+        prompt_mode_frame = ttk.Frame(top)
+        prompt_mode_frame.grid(row=row, column=1, sticky="w", padx=4, pady=(4, 0))
+        self.prompt_mode_var = tk.StringVar(value="free")
+        ttk.Radiobutton(
+            prompt_mode_frame, text="自由記載", value="free", variable=self.prompt_mode_var,
+            command=self._on_prompt_mode_change,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Radiobutton(
+            prompt_mode_frame, text="prompt.toml (毎枚自動)", value="toml", variable=self.prompt_mode_var,
+            command=self._on_prompt_mode_change,
+        ).pack(side=tk.LEFT)
 
         row += 1
         ttk.Label(top, text="プロンプト:").grid(row=row, column=0, sticky="ne", padx=4, pady=4)
@@ -461,9 +488,12 @@ class GenerateGUI:
         self.controlnets = _list_safetensors(SDXL_CONTROLNET_DIR)
 
     def _filtered_checkpoints(self) -> list[Path]:
-        """版フィルタ (`self.arch_filter_var`) を適用した checkpoint リスト。"""
+        """版フィルタ (`self.arch_filter_var`) を適用した checkpoint リスト。
+        mix の場合は両 dir をそのまま返す (combobox の [SD15]/[SDXL] tag で区別可能)。"""
         arch = getattr(self, "arch_filter_var", None)
         version = arch.get() if arch else "sdxl"
+        if version == "mix":
+            return list(self.checkpoints)
         target_dir = SDXL_CHECKPOINT_DIR if version == "sdxl" else SD15_CHECKPOINT_DIR
         return [p for p in self.checkpoints if p.parent == target_dir]
 
@@ -495,6 +525,14 @@ class GenerateGUI:
         return VERSION_BY_DIR.get(ckpt.parent, "sd15")
 
     # ---------- イベント ---------- #
+    def _on_prompt_mode_change(self) -> None:
+        """prompt.toml モードでは prompt_text を読み取り専用にする (毎枚 build_prompt 自動)。"""
+        mode = self.prompt_mode_var.get()
+        if mode == "toml":
+            self.prompt_text.configure(state="disabled", bg="#eeeeee")
+        else:
+            self.prompt_text.configure(state="normal", bg="white")
+
     def _on_checkpoint_random_toggle(self) -> None:
         """「ランダム」ON で combobox を無効化 (表示は最後の選択を保持、生成時に毎枚 random.choice)"""
         if self.checkpoint_random_var.get():
@@ -532,6 +570,8 @@ class GenerateGUI:
             self.lora_listbox.insert(tk.END, p.stem)
         self.selected_lora_indices.clear()
         self._refresh_lora_icons()
+        # 版切替 → LoRA リストが入れ替わったので候補ハイライトを再計算
+        self._refresh_lora_candidate_highlight()
 
         # Embedding は worker 側で helper が CLI と同じ自動投入 (UI 不要)
         # SD15 を選んだら ControlNet は使えないので選択解除
@@ -547,6 +587,38 @@ class GenerateGUI:
     def _on_lora_select(self, event=None) -> None:
         self.selected_lora_indices = set(self.lora_listbox.curselection())
         self._refresh_lora_icons()
+
+    def _refresh_lora_candidate_highlight(self) -> None:
+        """LoRA キーワード変更/版切替時に呼び出す。pick_lora_by_keywords でマッチしうる
+        LoRA を listbox で赤背景 (#ffcccc) に染め、それ以外は白に戻す。"""
+        if not hasattr(self, "lora_listbox"):
+            return
+        raw = self.lora_kw_var.get() or ""
+        keywords = [k.strip() for k in raw.split(",") if k.strip()]
+        n = self.lora_listbox.size()
+        if not keywords:
+            for i in range(n):
+                try:
+                    self.lora_listbox.itemconfig(i, background="white")
+                except Exception:
+                    pass
+            return
+        try:
+            if self._lora_params_cache is None:
+                self._lora_params_cache = load_lora_params()
+        except Exception:
+            self._lora_params_cache = {}
+        corpus = build_lora_corpus(self.current_loras, self._lora_params_cache or {})
+        clauses = _parse_keyword_clauses(keywords)
+        for i, lora in enumerate(self.current_loras):
+            if i >= n:
+                break
+            text = corpus.get(lora.stem) or lora.stem.lower()
+            bg = "#ffcccc" if _text_matches_clauses(text, clauses) else "white"
+            try:
+                self.lora_listbox.itemconfig(i, background=bg)
+            except Exception:
+                pass
 
     def _on_cn_select(self, event=None) -> None:
         sel = self.cn_listbox.curselection()
@@ -674,20 +746,27 @@ class GenerateGUI:
             messagebox.showerror("エラー", "チェックポイントが選択されていません")
             return
         if ckpt_random and not random_pool:
+            arch_label = self.arch_filter_var.get().upper() if self.arch_filter_var.get() != "mix" else "混合 (SD15+SDXL)"
             messagebox.showerror(
                 "エラー",
-                f"選択中の版 ({self.arch_filter_var.get().upper()}) に "
+                f"選択中の版 ({arch_label}) に "
                 "チェックポイントが 1 つも見つかりません",
             )
             return
-        prompt_body = self.prompt_text.get("1.0", "end").strip()
+        prompt_mode = self.prompt_mode_var.get()  # "free" / "toml"
         positive_extra = self.positive_value.strip()
         negative = self.negative_value.strip()
-        if not prompt_body and not positive_extra:
-            messagebox.showerror("エラー", "プロンプトかポジティブを入力してください")
-            return
-        positive = ", ".join(p for p in (prompt_body, positive_extra) if p)
-        positive = normalize_emphasis(positive)
+        if prompt_mode == "toml":
+            # prompt.toml モード: worker 側で毎枚 build_prompt するので、UI 入力は空でも OK
+            # positive_extra は free モード時のみ前置 (toml モードはエントリそのものをそのまま使う)
+            positive = ""
+        else:
+            prompt_body = self.prompt_text.get("1.0", "end").strip()
+            if not prompt_body and not positive_extra:
+                messagebox.showerror("エラー", "プロンプトかポジティブを入力してください")
+                return
+            positive = ", ".join(p for p in (prompt_body, positive_extra) if p)
+            positive = normalize_emphasis(positive)
         negative = normalize_emphasis(negative)
 
         version = self._current_version()
@@ -725,7 +804,9 @@ class GenerateGUI:
             "checkpoint_random": ckpt_random,
             "checkpoint_random_pool": random_pool,
             "version": version,
+            "prompt_mode": prompt_mode,
             "positive": positive,
+            "positive_extra": positive_extra,  # toml モードで追加前置するときに使う
             "negative": negative,
             "loras": loras_with_strength,
             "lora_keywords": lora_keywords,
@@ -779,6 +860,7 @@ class GenerateGUI:
             prompt_body = ""
         return {
             "prompt":            prompt_body,
+            "prompt_mode":       str(self.prompt_mode_var.get()),
             "count":             int(self.count_var.get()),
             "checkpoint_random": bool(self.checkpoint_random_var.get()),
             "arch_filter":       str(self.arch_filter_var.get()),
@@ -850,8 +932,11 @@ class GenerateGUI:
             self.negative_value = str(data["negative"])
 
         _try(self.count_var.set,        "count",         int)
+        if "prompt_mode" in data and str(data["prompt_mode"]) in ("free", "toml"):
+            self.prompt_mode_var.set(str(data["prompt_mode"]))
+            self._on_prompt_mode_change()
         # 版フィルタを先に復元 → combobox を絞った状態で他の Var を入れる
-        if "arch_filter" in data and str(data["arch_filter"]) in ("sd15", "sdxl"):
+        if "arch_filter" in data and str(data["arch_filter"]) in ("sd15", "sdxl", "mix"):
             self.arch_filter_var.set(str(data["arch_filter"]))
             self._populate_checkpoint_combo()
         _try(self.checkpoint_random_var.set, "checkpoint_random", bool)
@@ -1059,6 +1144,17 @@ class GenerateGUI:
         lora_keywords: list[str] = list(params.get("lora_keywords") or [])
         manual_loras = params["loras"] or []
         lora_total = float(self.lora_total_var.get())
+        prompt_mode = params.get("prompt_mode", "free")
+        positive_extra = str(params.get("positive_extra") or "").strip()
+
+        # prompt.toml モード: load_prompt_config を 1 回だけキャッシュし、毎枚 build_prompt で抽選
+        prompt_cfg = None
+        if prompt_mode == "toml":
+            try:
+                prompt_cfg = load_prompt_config()
+            except Exception as e:
+                self._result_queue.put({"error": f"prompt.toml 読み込み失敗: {e}"})
+                return
 
         # キーワード抽選で使う LoRA corpus は ckpt 確定後に組む必要があるが、
         # LoRA_param.toml は 1 回だけ読めば良いので先にキャッシュ
@@ -1117,6 +1213,20 @@ class GenerateGUI:
             else:
                 seed = (seed_input + i) & 0x7FFFFFFF
 
+            # prompt.toml モード: 毎枚 build_prompt で抽選 (positive/negative/kw/many を上書き)
+            # 自由記載モード: gather 時点で確定済の params["positive"] 等をそのまま使う
+            if prompt_mode == "toml":
+                iter_pos, iter_neg, iter_kws, iter_many = build_prompt(prompt_cfg)
+                if positive_extra:
+                    iter_pos = f"{positive_extra}, {iter_pos}" if iter_pos else positive_extra
+                iter_pos = normalize_emphasis(iter_pos)
+                iter_neg = normalize_emphasis(iter_neg)
+            else:
+                iter_pos = params["positive"]
+                iter_neg = params["negative"]
+                iter_kws = lora_keywords
+                iter_many = bool(params.get("many"))
+
             # チェックポイントが「ランダム」なら毎枚抽選し、version / pool を再決定
             if ckpt_random:
                 # SD15/SDXL ラジオで絞った候補のみから抽選 (版は固定なので手動 LoRA も活かせる)
@@ -1142,10 +1252,10 @@ class GenerateGUI:
             #   ③ 手動選択なし & キーワードなし → LoRA 無し
             if this_manual:
                 this_loras = this_manual
-            elif lora_keywords:
+            elif iter_kws:
                 corpus = build_lora_corpus(this_pool, lora_params_cache)
                 picked = pick_n_loras_by_keywords(
-                    this_pool, lora_keywords, corpus, n_max=3, n_min=1,
+                    this_pool, iter_kws, corpus, n_max=3, n_min=1,
                 )
                 scale = lora_total / max(1, len(picked))
                 this_loras = [(p, scale) for p in picked]
@@ -1154,7 +1264,8 @@ class GenerateGUI:
 
             # 2 人以上 (ワイド) ON → 版に応じた横長プリセットで base 解像度を上書き
             # (人物融合を抑える。OFF は設定ダイアログの width/height をそのまま使う)
-            if params.get("many"):
+            # toml モードでは build_prompt の many フラグも OR で考慮する
+            if iter_many:
                 this_w, this_h = WIDE_RES.get(this_version, (base_w, base_h))
             else:
                 this_w, this_h = base_w, base_h
@@ -1173,8 +1284,8 @@ class GenerateGUI:
 
             # CLI と同じ helper で augmentation 集約: score prefix / kw append / neg embed / family-gate / pose-gate
             positive_aug, negative_aug, this_loras_filtered, gate_logs = prepare_workflow_prompt(
-                params["positive"], params["negative"],
-                lora_keywords=lora_keywords,
+                iter_pos, iter_neg,
+                lora_keywords=iter_kws,
                 picked_loras=this_loras,
                 checkpoint_path=this_ckpt,
                 checkpoint_data=checkpoint_data,
@@ -1240,7 +1351,7 @@ class GenerateGUI:
                     steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler,
                     width=final_w, height=final_h,
                     checkpoint=this_ckpt.name,
-                    lora_keywords=lora_keywords,
+                    lora_keywords=iter_kws,
                     loras=workflow_loras or None,
                     adetailer=params["adetailer"],
                     pipeline="GUI",

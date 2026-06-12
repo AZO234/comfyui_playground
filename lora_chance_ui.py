@@ -29,50 +29,20 @@ try:
 except (AttributeError, OSError):
     pass
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore
-
 import questionary
 
 from common import (
     L,
-    build_lora_corpus,
     build_prompt,
     load_prompt_config,
     pick_n_loras_by_keywords,
 )
-
-# --------------------------------------------------------------------------- #
-# 定数
-# --------------------------------------------------------------------------- #
-ROOT               = Path(__file__).parent
-LORA_DIR           = ROOT / "4_2_SDXL_LoRA"
-LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
-
-
-# --------------------------------------------------------------------------- #
-# LoRA_keywords.toml ローダ + corpus 構築 (generate.py と同じ実装)
-# --------------------------------------------------------------------------- #
-def load_lora_keywords_toml() -> dict:
-    if not LORA_KEYWORDS_TOML.exists():
-        return {}
-    try:
-        return tomllib.loads(LORA_KEYWORDS_TOML.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(L(f"[警告] LoRA_keywords.toml パース失敗 ({e})",
-                f"[WARNING] LoRA_keywords.toml parse failed ({e})"), flush=True)
-        return {}
-
-
-def build_lora_corpus_for_playground(loras: list[Path], kw_data: dict) -> dict[str, str]:
-    """common.build_lora_corpus への薄いアダプタ (keyword → trigger 名前変換)。"""
-    adapter = {
-        stem: {"trigger": str((entry or {}).get("keyword") or "")}
-        for stem, entry in kw_data.items()
-    }
-    return build_lora_corpus(loras, adapter)
+# generate.py との重複定義を撤廃し、定数/ヘルパは generate.py を正本として import
+from generate import (
+    SDXL_LORA_DIR as LORA_DIR,
+    build_lora_corpus_for_playground,
+    load_lora_keywords_toml,
+)
 
 
 # --------------------------------------------------------------------------- #

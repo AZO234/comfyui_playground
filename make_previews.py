@@ -12,7 +12,7 @@ sd_tensors_view 等のビューアはこのサイドカーを拾って表示で�
     SD15 LoRA→SD15 ベース / SDXL LoRA→pony→sdxl→illustrious の順で代表ベースを使う。
 
 生成は ComfyUI HTTP API 経由 (generate.py の build_workflow_txt2img / _submit_and_fetch を流用)。
-ComfyUI が起動している必要がある。
+ComfyUI 未起動なら main() 冒頭で自動起動 (ensure_comfyui_arch、--dry-run は触らない)。
 
 使い方:
     python make_previews.py                         # 全 checkpoint + LoRA (既存サイドカーはスキップ)
@@ -46,6 +46,7 @@ from generate import (
     _family_from_name,
     _submit_and_fetch,
     build_workflow_txt2img,
+    ensure_comfyui_arch,
     load_checkpoint_toml,
     write_extra_model_paths,
 )
@@ -471,7 +472,9 @@ def regenerate(path: Path, *, seed: Optional[int] = None, steps: int = 24, cfg: 
                categories_file: Path = CATEGORIES_FILE,
                client_id: Optional[str] = None) -> Path:
     """checkpoint / LoRA 1 つのプレビューを現在の LoRA_preview.toml 設定で焼き直し、
-    サイドカー <name>.preview.png に保存してそのパスを返す (ComfyUI 稼働が前提)。
+    サイドカー <name>.preview.png に保存してそのパスを返す。
+    呼び出し側 (main()) で ComfyUI 起動済み前提。直接 import して使う場合は事前に
+    `ensure_comfyui_arch(arch)` を呼んでおくこと。
 
     tensors_view の『再生成』ボタンから呼ぶ想定。失敗時は例外。
     """
@@ -557,6 +560,9 @@ def main() -> None:
     ap.add_argument("--files", nargs="*", default=None,
                     help=L("指定したファイル(パス)だけ再生成して終了 (tensors_view が別プロセスで呼ぶ)",
                            "regenerate only the given file paths and exit (called by tensors_view as a subprocess)"))
+    ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
+                    help=L("ComfyUI 側 device (既定 cuda)。未起動なら自動で立ち上げる",
+                           "ComfyUI device (default cuda). Auto-launches ComfyUI if not running"))
     for fam in ("sd15", "pony", "2d", "real", "sdxl"):
         ap.add_argument(f"--base-{fam}", type=str, default=None,
                         help=L(f"{fam} 系 LoRA のベース checkpoint を明示指定",
@@ -568,9 +574,14 @@ def main() -> None:
         # SD15/SDXL とも実 dir をスキャンして version-split TOML を初期化 (既存手編集は保持)
         write_preview_categories(guess=args.guess, lora_preview_path=cat_file)
         return
+
+    # ComfyUI 未起動なら自動起動 (起動済みなら no-op、--dry-run は触らない)
+    if not args.dry_run:
+        yaml_changed = write_extra_model_paths()
+        ensure_comfyui_arch(args.arch, force_restart=yaml_changed)
+
     if args.files:
         # 指定ファイルだけ再生成 (tensors_view が subprocess で呼ぶ。GUI を torch から隔離)
-        write_extra_model_paths()
         n_ok = n_fail = 0
         for f in args.files:
             p = Path(f)
@@ -599,8 +610,7 @@ def main() -> None:
     print(L(f"系統別ベース: " + ", ".join(f"{k}={v.stem}" for k, v in bases.items()),
             f"family bases: " + ", ".join(f"{k}={v.stem}" for k, v in bases.items())))
 
-    if not args.dry_run:
-        write_extra_model_paths()   # ComfyUI に model dir を登録 (idempotent)
+    # write_extra_model_paths + ensure_comfyui_arch は main 冒頭で 1 回 済み
 
     # 処理対象を集める (kind → version フィルタ → limit の順)
     targets: list[tuple[str, Path]] = []
