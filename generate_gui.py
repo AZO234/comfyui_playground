@@ -67,6 +67,7 @@ from generate import (
     collect_negative_embeddings,
     ensure_adetailer_model,
     ensure_comfyui_arch,
+    ensure_sd15_vae_mse,
     ensure_sdxl_vae_fix,
     ensure_upscale_model,
     infer_controlnet_mode,
@@ -163,6 +164,8 @@ class GenerateGUI:
 
         self._build_ui()
         self._scan_assets()
+        # _build_ui の時点で self.controlnets はまだ空なので、scan 後に listbox を埋める
+        self._populate_cn_listbox()
         self._populate_checkpoint_combo()
         self._load_settings()
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
@@ -299,9 +302,8 @@ class GenerateGUI:
         self.cn_listbox.config(yscrollcommand=cn_scroll.set)
         self.cn_listbox.bind("<<ListboxSelect>>", self._on_cn_select)
 
-        # ControlNet を populate (1 回だけ、checkpoint 切替で消さない)
-        for p in self.controlnets:
-            self.cn_listbox.insert(tk.END, p.stem)
+        # 実際の populate は self.controlnets が埋まる _scan_assets 後に
+        # __init__ → _populate_cn_listbox() で実行する
 
         # リファレンス画像 (D&D で受け取り、ControlNet preprocess に流す)
         row += 1
@@ -496,6 +498,16 @@ class GenerateGUI:
             return list(self.checkpoints)
         target_dir = SDXL_CHECKPOINT_DIR if version == "sdxl" else SD15_CHECKPOINT_DIR
         return [p for p in self.checkpoints if p.parent == target_dir]
+
+    def _populate_cn_listbox(self) -> None:
+        """ControlNet listbox を self.controlnets (= _scan_assets で埋めた SDXL_CONTROLNET_DIR の中身)
+        で 1 回だけ埋める。checkpoint 切替では呼ばない (CN は SDXL のときだけ意味があり、
+        SD15 切替時は _on_checkpoint_change で選択クリアするのみ)。"""
+        if not hasattr(self, "cn_listbox"):
+            return
+        self.cn_listbox.delete(0, tk.END)
+        for p in self.controlnets:
+            self.cn_listbox.insert(tk.END, p.stem)
 
     def _populate_checkpoint_combo(self) -> None:
         ckpts = self._filtered_checkpoints()
@@ -1124,12 +1136,17 @@ class GenerateGUI:
             except Exception as e:
                 self._result_queue.put({"status": f"ADetailer モデル準備失敗 ({e}) → スキップ"})
 
-        # SDXL 安定 VAE (madebyollin/sdxl-vae-fp16-fix) を起動時 1 回 DL + 解決
-        # checkpoint 同梱 VAE の round-trip 色シフト対策。SDXL ckpt のときだけ使う
+        # 各版の安定 VAE を worker 起動時 1 回 DL + 解決
+        # SDXL: madebyollin/sdxl-vae-fp16-fix (茶色フィルム対策)
+        # SD15: stabilityai/sd-vae-ft-mse-original (グレースケール脱色 + マゼンタスペック対策)
         try:
             sdxl_vae_name = ensure_sdxl_vae_fix()
         except Exception:
             sdxl_vae_name = None
+        try:
+            sd15_vae_name = ensure_sd15_vae_mse()
+        except Exception:
+            sd15_vae_name = None
 
         base_w = int(params["width"])
         base_h = int(params["height"])
@@ -1325,7 +1342,7 @@ class GenerateGUI:
                 controlnet_image=this_cn_image,
                 controlnet_strength=cn_strength,
                 # SDXL のときだけ安定 VAE を被せる (SD15 ckpt には流用不可)
-                vae_override=sdxl_vae_name if this_version == "sdxl" else None,
+                vae_override=sdxl_vae_name if this_version == "sdxl" else sd15_vae_name,
             )
 
             try:

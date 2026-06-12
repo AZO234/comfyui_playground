@@ -1093,35 +1093,57 @@ def ensure_adetailer_model(rel_name: Optional[str]) -> Optional[str]:
 # 明示的に差し替える経路を設けた (2026-06-11)。
 # --------------------------------------------------------------------------- #
 VAE_DIR = COMFYUI_DIR / "models" / "vae"
-_SDXL_VAE_FIX_REPO = "madebyollin/sdxl-vae-fp16-fix"
-_SDXL_VAE_FIX_FILE = "sdxl_vae.safetensors"  # HF 上のファイル名
-_SDXL_VAE_FIX_LOCAL = "sdxl_vae_fp16_fix.safetensors"  # ComfyUI 側の保存名
+
+# (repo, hf_file, local_name) for each lane
+_SDXL_VAE_FIX = (
+    "madebyollin/sdxl-vae-fp16-fix",
+    "sdxl_vae.safetensors",
+    "sdxl_vae_fp16_fix.safetensors",
+)
+# SD15 用安定版: 定番の sd-vae-ft-mse-840000 (fp16 オーバーフロー耐性あり)。
+# checkpoint 同梱 VAE は fp16 で NaN/Inf を吐き、特定ピクセルだけ原色化する
+# (グレースケール脱色 + マゼンタ/紫のスペック) 問題が出るため。
+_SD15_VAE_FIX = (
+    "stabilityai/sd-vae-ft-mse-original",
+    "vae-ft-mse-840000-ema-pruned.safetensors",
+    "sd_vae_ft_mse_840000.safetensors",
+)
 
 
-def ensure_sdxl_vae_fix() -> Optional[str]:
-    """madebyollin/sdxl-vae-fp16-fix の VAE を ComfyUI/models/vae/ に配置し、ファイル名を返す。
-    既に置いてあればそのまま返す。DL 失敗時は None (caller 側で checkpoint 同梱 VAE にフォールバック)。
-    """
-    full = VAE_DIR / _SDXL_VAE_FIX_LOCAL
+def _ensure_vae(repo: str, hf_file: str, local_name: str) -> Optional[str]:
+    full = VAE_DIR / local_name
     if full.is_file():
-        return _SDXL_VAE_FIX_LOCAL
-    print(L(f"  [vae] {_SDXL_VAE_FIX_LOCAL} が無い → {_SDXL_VAE_FIX_REPO} から DL 試行...",
-            f"  [vae] {_SDXL_VAE_FIX_LOCAL} not found → attempting download from {_SDXL_VAE_FIX_REPO}..."), flush=True)
+        return local_name
+    print(L(f"  [vae] {local_name} が無い → {repo} から DL 試行...",
+            f"  [vae] {local_name} not found → attempting download from {repo}..."), flush=True)
     try:
         from huggingface_hub import hf_hub_download
         import shutil
-        src = hf_hub_download(_SDXL_VAE_FIX_REPO, _SDXL_VAE_FIX_FILE)
+        src = hf_hub_download(repo, hf_file)
         full.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, full)
         print(L(f"  [vae] DL 完了 → {full} ({full.stat().st_size // 1024} KB)",
                 f"  [vae] download complete → {full} ({full.stat().st_size // 1024} KB)"), flush=True)
-        return _SDXL_VAE_FIX_LOCAL
+        return local_name
     except Exception as e:
-        print(L(f"  [vae][warn] {_SDXL_VAE_FIX_LOCAL} 自動 DL 失敗 ({type(e).__name__})。"
+        print(L(f"  [vae][warn] {local_name} 自動 DL 失敗 ({type(e).__name__})。"
                 f"checkpoint 同梱 VAE にフォールバック",
-                f"  [vae][warn] {_SDXL_VAE_FIX_LOCAL} download failed ({type(e).__name__}). "
+                f"  [vae][warn] {local_name} download failed ({type(e).__name__}). "
                 f"Falling back to checkpoint's bundled VAE"), flush=True)
         return None
+
+
+def ensure_sdxl_vae_fix() -> Optional[str]:
+    """madebyollin/sdxl-vae-fp16-fix を ComfyUI/models/vae/ に配置しファイル名を返す。
+    SDXL ckpt 同梱 VAE の round-trip 茶色フィルム化対策 (2026-06-11)。"""
+    return _ensure_vae(*_SDXL_VAE_FIX)
+
+
+def ensure_sd15_vae_mse() -> Optional[str]:
+    """stabilityai/sd-vae-ft-mse-original (vae-ft-mse-840000-ema-pruned) を
+    ComfyUI/models/vae/ に配置しファイル名を返す。SD15 ckpt 同梱 VAE の
+    fp16 オーバーフロー (グレースケール脱色 + マゼンタスペック) 対策 (2026-06-13)。"""
+    return _ensure_vae(*_SD15_VAE_FIX)
 
 
 # --------------------------------------------------------------------------- #
@@ -1823,6 +1845,13 @@ def main() -> None:
                            "Use madebyollin/sdxl-vae-fp16-fix for SDXL checkpoints (auto-download, default ON). "
                            "Mitigates round-trip color shift from bundled VAE (person ADetailer sepia bug). "
                            "No effect on SD15 checkpoints"))
+    ap.add_argument("--sd15-vae", action=argparse.BooleanOptionalAction, default=True,
+                    help=L("SD15 ckpt のとき stabilityai/sd-vae-ft-mse-original を自動 DL + 使用 (既定 ON)。"
+                           "checkpoint 同梱 VAE の fp16 オーバーフロー (グレースケール脱色 + マゼンタスペック) 対策。"
+                           "SDXL ckpt には無影響",
+                           "Use stabilityai/sd-vae-ft-mse-original for SD15 checkpoints (auto-download, default ON). "
+                           "Mitigates fp16 VAE overflow (greyscale desaturation + magenta speckles). "
+                           "No effect on SDXL checkpoints"))
     ap.add_argument("--hires-fix", action=argparse.BooleanOptionalAction, default=None,
                     help=L("Hires Fix (低解像度→1.5×二段)。draft / 清書段の両方に効く。"
                            "既定: gear high で ON / low で OFF",
@@ -1990,11 +2019,15 @@ def main() -> None:
                     "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
             args.adetailer = False
 
-    # SDXL 安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
+    # 各版の安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
     sdxl_vae_name: Optional[str] = ensure_sdxl_vae_fix() if args.sdxl_vae else None
+    sd15_vae_name: Optional[str] = ensure_sd15_vae_mse() if args.sd15_vae else None
     if sdxl_vae_name:
         print(L(f"  [vae] SDXL 用 VAE 差し替え: {sdxl_vae_name}",
                 f"  [vae] SDXL VAE override: {sdxl_vae_name}"), flush=True)
+    if sd15_vae_name:
+        print(L(f"  [vae] SD15 用 VAE 差し替え: {sd15_vae_name}",
+                f"  [vae] SD15 VAE override: {sd15_vae_name}"), flush=True)
 
     # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
     pose_png: Optional[Path] = None
@@ -2264,7 +2297,7 @@ def main() -> None:
                 hires_fix=args.hires_fix, hires_scale=args.hires_scale,
                 hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
                 # SDXL ckpt のときだけ安定 VAE を被せる (SD15 には流用不可)
-                vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else None,
+                vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else sd15_vae_name,
             )
             if args.adetailer:
                 parts = [f"face={face_model}"]
