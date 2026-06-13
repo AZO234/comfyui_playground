@@ -76,13 +76,14 @@ $ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
 - `3_1_SD15_checkpoint` ： SD15 checkpoint テンソル（ラフ / 量産レーン）
 - `3_2_SD15_LoRA` ： SD15 LoRA テンソル
 - `3_3_SD15_Embedding` ： SD15 Embedding テンソル
-- `3_9_SD15_rough` ： 2段チェーンの SD15 下書き（清書前のラフ）が出力される
+- `3_8_SD15_generated` ： SD15 checkpoint で生成した PNG（メタ付き）が出力される
+- `3_9_SD15_upscaled` ： SD15 のアップスケール後 PNG（メタ付き）が出力される
 - `4_1_SDXL_checkpoint` ： SDXL checkpoint テンソル（本番レーン）
 - `4_2_SDXL_LoRA` ： SDXL LoRA テンソル
 - `4_3_SDXL_ControlNet` ： SDXL ControlNet テンソル
 - `4_4_SDXL_Embedding` ： SDXL Embedding テンソル
-- `5_1_generated` ： 生成された PNG画像（メタ入り） が出力される
-- `5_2_upscaled` ： アップスケールされた PNG画像（メタ入り） が出力される
+- `5_1_SDXL_generated` ： 生成された PNG画像（メタ入り） が出力される
+- `5_2_SDXL_upscaled` ： アップスケールされた PNG画像（メタ入り） が出力される
 
 テンソルは `tensors.py` が各ファイルの判定アーキテクチャに応じて
 SD15 (`3_x`) / SDXL (`4_x`) レーンへ自動振り分けする。
@@ -103,8 +104,8 @@ python dist_tensors.py
 python generate.py --sentence "a girl walking with umbrella in outside"
 ```
 
-`5_1_generated` に通常画像、  
-`5_2_upscaled` にアップスケール画像が生成されます。
+`5_1_SDXL_generated` に通常画像、  
+`5_2_SDXL_upscaled` にアップスケール画像が生成されます。
 
 
 ## 生成フロー（概念図）
@@ -137,7 +138,7 @@ flowchart TD
   FN --> HG
   HG -->|high| AD["ADetailer<br/>person→face→hand→NSFW部位<br/>→ upscale x4"]
   HG -->|low| OUT
-  AD --> OUT["出力 5_1_generated / 5_2_upscaled<br/>メタ: Pipeline / Draft model / Draft loras"]
+  AD --> OUT["出力 5_1_SDXL_generated / 5_2_SDXL_upscaled<br/>メタ: Pipeline / Draft model / Draft loras"]
   S1 --> OUT
 ```
 
@@ -249,7 +250,7 @@ python generate.py
 画像を連続で生成する。
 生成前に、tensors.py が実行される。
 
-メタ情報入り画像 `YYYYMMDDHHMMSS.png` が `5_1_generated`・`5_2_upscaled` ディレクトリに出力される。  
+メタ情報入り画像 `YYYYMMDDHHMMSS.png` が `5_1_SDXL_generated`・`5_2_SDXL_upscaled` ディレクトリに出力される。  
 
 画像生成後、(デバイス温度-50)秒、冷却インターバル。  
 
@@ -279,7 +280,7 @@ Ctrl+Cで終了。
 - LoRA は PNG の LoRAキーワード（or `--lora-keywords`）から SDXL LoRA を抽選。
 - `--refine-denoise <0.0〜1.0>` ： img2img の denoise（既定 0.5。低=元に忠実 / 高=SDXL が大きく描き直す）。
 - 解像度は元 PNG のアスペクトを保って約 1MP（SDXL ネイティブ）にスケール。`--gear high` で ADetailer + アップスケール、`--gear low` は refine のみ。
-- 出力は `5_1_generated` / `5_2_upscaled`、メタの `Pipeline` に `refine (src:…, denoise…)` を記録。**1 枚生成して終了**。
+- 出力は `5_1_SDXL_generated` / `5_2_SDXL_upscaled`、メタの `Pipeline` に `refine (src:…, denoise…)` を記録。**1 枚生成して終了**。
 
 ##### チェックポイント抽選方式
 
@@ -486,7 +487,7 @@ python generate_gui.py
 
 #### アップスケール（右クリック）
 
-ギャラリー上で右クリック → 「アップスケール（Real-ESRGAN x4）」→ **アニメ（既定）** または **実写** を選択。`_upscale_worker` が ComfyUI に upscale 専用 workflow を投入し、`5_2_upscaled/<元名>.png` に保存。モデル（`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`）は無ければ公式 GitHub release から `ensure_upscale_model` が自動 DL。
+ギャラリー上で右クリック → 「アップスケール（Real-ESRGAN x4）」→ **アニメ（既定）** または **実写** を選択。`_upscale_worker` が ComfyUI に upscale 専用 workflow を投入し、`5_2_SDXL_upscaled/<元名>.png` に保存。モデル（`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`）は無ければ公式 GitHub release から `ensure_upscale_model` が自動 DL。
 
 #### 自動化される下準備
 
@@ -503,7 +504,7 @@ python gallery.py [--list]
 
 生成済み PNG をサムネイル一覧する Tkinter ビューア。**閲覧専用**（コピー・削除なし、誤操作防止）。
 
-- 固定 3 ディレクトリを再帰走査： `3_9_SD15_rough` / `5_1_generated` / `5_2_upscaled`
+- 固定 4 ディレクトリを再帰走査： `3_8_SD15_generated` / `3_9_SD15_upscaled` / `5_1_SDXL_generated` / `5_2_SDXL_upscaled`
 - A1111 互換メタ（parameters chunk）を読んでサムネ + メタ一覧表示。`Pipeline` フィールド優先で SD15 / SDXL を色分け（無ければ Size で補完）
 - アイコン view / リスト view を切替（列ヘッダクリックでソート、行サムネはスライダーで 24-128 px 可変）
 - 検索（name/model/loras/keywords/positive/pipeline の AND 部分一致）+ アーキフィルタ

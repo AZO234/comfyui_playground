@@ -61,13 +61,14 @@ $ pip install -r requirements.txt
 - `3_1_SD15_checkpoint` : SD15 checkpoint tensors (rough / high-volume lane)
 - `3_2_SD15_LoRA` : SD15 LoRA tensors
 - `3_3_SD15_Embedding` : SD15 embedding tensors
-- `3_9_SD15_rough` : SD15 drafts from the two-stage chain (rough output before the clean pass) are written here
+- `3_8_SD15_generated` : Generated PNGs from SD15 checkpoints (with metadata) are written here
+- `3_9_SD15_upscaled` : Upscaled SD15 PNGs (with metadata) are written here
 - `4_1_SDXL_checkpoint` : SDXL checkpoint tensors (production lane)
 - `4_2_SDXL_LoRA` : SDXL LoRA tensors
 - `4_3_SDXL_ControlNet` : SDXL ControlNet tensors
 - `4_4_SDXL_Embedding` : SDXL embedding tensors
-- `5_1_generated` : Generated PNGs (with metadata) are written here
-- `5_2_upscaled` : Upscaled PNGs (with metadata) are written here
+- `5_1_SDXL_generated` : Generated PNGs from SDXL checkpoints (with metadata) are written here
+- `5_2_SDXL_upscaled` : Upscaled SDXL PNGs (with metadata) are written here
 
 Tensors are auto-sorted by `tensors.py` into the SD15 (`3_x`) or SDXL (`4_x`) lane
 based on the model architecture detected from each file.
@@ -88,8 +89,8 @@ python dist_tensors.py
 python generate.py --sentence "a girl walking with umbrella in outside"
 ```
 
-Standard images are written to `5_1_generated`,
-upscaled images to `5_2_upscaled`.
+Standard images are written to `5_1_SDXL_generated`,
+upscaled images to `5_2_SDXL_upscaled`.
 
 
 ## Generation Flow (Overview)
@@ -122,7 +123,7 @@ flowchart TD
   FN --> HG
   HG -->|high| AD["ADetailer<br/>person→face→hand→NSFW parts<br/>→ upscale x4"]
   HG -->|low| OUT
-  AD --> OUT["Output 5_1_generated / 5_2_upscaled<br/>meta: Pipeline / Draft model / Draft loras"]
+  AD --> OUT["Output 5_1_SDXL_generated / 5_2_SDXL_upscaled<br/>meta: Pipeline / Draft model / Draft loras"]
   S1 --> OUT
 ```
 
@@ -234,7 +235,7 @@ python generate.py
 Generates images continuously.
 `tensors.py` is run first.
 
-PNGs with embedded metadata, named `YYYYMMDDHHMMSS.png`, are written to `5_1_generated` and `5_2_upscaled`.
+PNGs with embedded metadata, named `YYYYMMDDHHMMSS.png`, are written to `5_1_SDXL_generated` and `5_2_SDXL_upscaled`.
 
 After each image, there is a cooldown interval of (device temperature − 50) seconds.
 
@@ -264,7 +265,7 @@ A one-shot mode that lifts older SD15 images (and the like) toward SDXL-grade qu
 - LoRAs are drawn from the SDXL LoRAs using the PNG's LoRA keywords (or `--lora-keywords`).
 - `--refine-denoise <0.0–1.0>` : img2img denoise (default 0.5; low = faithful to the original / high = SDXL repaints more aggressively).
 - The resolution is scaled to roughly 1MP (SDXL-native) while preserving the original PNG's aspect ratio. `--gear high` adds ADetailer + upscaling; `--gear low` does refine only.
-- Output goes to `5_1_generated` / `5_2_upscaled`, and the `Pipeline` metadata records `refine (src:…, denoise…)`. **Generates one image and exits.**
+- Output goes to `5_1_SDXL_generated` / `5_2_SDXL_upscaled`, and the `Pipeline` metadata records `refine (src:…, denoise…)`. **Generates one image and exits.**
 
 ##### Checkpoint selection
 
@@ -470,7 +471,7 @@ Opened via "Settings…" on the main window. Values are persisted to `generate_g
 
 #### Upscaling (right-click)
 
-Right-click on a gallery thumbnail → "Upscale (Real-ESRGAN x4)" → choose **Anime (default)** or **Real**. `_upscale_worker` submits a standalone upscale workflow to ComfyUI and saves the result to `5_2_upscaled/<original_name>.png`. The models (`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`) are auto-downloaded by `ensure_upscale_model` from the official xinntao GitHub releases when missing.
+Right-click on a gallery thumbnail → "Upscale (Real-ESRGAN x4)" → choose **Anime (default)** or **Real**. `_upscale_worker` submits a standalone upscale workflow to ComfyUI and saves the result to `5_2_SDXL_upscaled/<original_name>.png`. The models (`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`) are auto-downloaded by `ensure_upscale_model` from the official xinntao GitHub releases when missing.
 
 #### Auto-prepared dependencies
 
@@ -487,7 +488,7 @@ python gallery.py [--list]
 
 A Tkinter thumbnail gallery for generated PNGs. **Read-only** — no copy / no delete (guards against accidental writes).
 
-- Recursively scans three fixed directories: `3_9_SD15_rough` / `5_1_generated` / `5_2_upscaled`
+- Recursively scans three fixed directories: `3_9_SD15_rough` / `5_1_SDXL_generated` / `5_2_SDXL_upscaled`
 - Reads A1111-compatible metadata (parameters chunk) and shows thumbnails + metadata. SD15 / SDXL is color-coded based on the `Pipeline` field (falling back to `Size`)
 - Toggle between Icon view and List view (click column headers to sort; row thumbnail size is adjustable 24–128 px via slider)
 - Search (AND substring across name/model/loras/keywords/positive/pipeline) plus arch filter

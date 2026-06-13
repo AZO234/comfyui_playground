@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gallery.py - 生成済み PNG をサムネイル一覧するデスクトップビューア (Tkinter)。
 
-固定 3 ディレクトリ (3_9_SD15_rough / 5_1_generated / 5_2_upscaled) を再帰走査し、
+固定 4 ディレクトリ (SD15 / SDXL × 生成 / アップスケール) を再帰走査し、
 A1111 互換メタ (parameters chunk) を読み取ってサムネイル + メタ情報の一覧を表示する。
 名前 / 時刻 / アーキ(SD15·SDXL) / Model / Size でソート、テキスト検索でフィルタ、
 選択画像の全メタ表示、OS ビューアで開ける。
@@ -14,7 +14,7 @@ SD15/SDXL の判定は parameters の `Pipeline` フィールド優先 + `Size` 
 UI 文字列は i18n の L() で英/日切替 (PLAYGROUND_LANG / OS ロケール)。
 
 使い方:
-    python gallery.py                      # GUI ビューアを起動 (固定 3 dir)
+    python gallery.py                      # GUI ビューアを起動 (固定 4 dir)
     python gallery.py --list               # GUI なしでメタ一覧を標準出力
     python gallery.py --dir PATH [PATH...] # 任意のディレクトリを走査対象に差し替え
 """
@@ -44,12 +44,13 @@ except (AttributeError, OSError):
 
 ROOT = Path(__file__).resolve().parent
 
-# 閲覧対象の既定ディレクトリ (この 3 つを再帰走査して PNG を集める)
+# 閲覧対象の既定ディレクトリ (SD15 / SDXL × 生成 / upscaled の 4 dir を再帰走査して PNG を集める)
 # `--dir PATH [PATH...]` 指定時はこの既定が差し替えられる (main() 参照)
 VIEW_DIRS = [
-    ROOT / "3_9_SD15_rough",
-    ROOT / "5_1_generated",
-    ROOT / "5_2_upscaled",
+    ROOT / "3_8_SD15_generated",
+    ROOT / "3_9_SD15_upscaled",
+    ROOT / "5_1_SDXL_generated",
+    ROOT / "5_2_SDXL_upscaled",
 ]
 
 # サムネイル / プレビューの最大辺 (px)

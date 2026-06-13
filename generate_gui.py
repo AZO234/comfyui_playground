@@ -4,7 +4,8 @@
 generate.py の CLI ループに対する、手動指定・即時可視化版。
 - チェックポイント / LoRA / プロンプトを手で選び、1〜300 枚をまとめて生成。
 - *word* / **word** / ***word*** の重み記法は normalize_emphasis でそのまま使える。
-- 生成画像は 5_1_generated に PNG + A1111 メタ付きで保存し、画面下段の
+- 生成画像は版で分かれた dir (SDXL=5_1_SDXL_generated / SD15=3_8_SD15_generated) に
+  PNG + A1111 メタ付きで保存し、画面下段の
   サムネイル列に追記。サムネクリックでモーダルフルサイズ表示。
 
 generate.py の build_workflow_txt2img / _submit_and_fetch / save_with_a1111_metadata
@@ -53,15 +54,17 @@ except ImportError:
     DND_FILES = None
     _DND_AVAILABLE = False
 from generate import (
-    GENERATED_DIR,
     SD15_CHECKPOINT_DIR,
     SD15_EMBED_DIR,
+    SD15_GENERATED_DIR,
     SD15_LORA_DIR,
+    SD15_UPSCALED_DIR,
     SDXL_CHECKPOINT_DIR,
     SDXL_CONTROLNET_DIR,
     SDXL_EMBED_DIR,
+    SDXL_GENERATED_DIR,
     SDXL_LORA_DIR,
-    UPSCALED_DIR,
+    SDXL_UPSCALED_DIR,
     _submit_and_fetch,
     build_workflow_txt2img,
     collect_negative_embeddings,
@@ -1246,9 +1249,16 @@ class GenerateGUI:
 
             # チェックポイントが「ランダム」なら毎枚抽選し、version / pool を再決定
             if ckpt_random:
-                # SD15/SDXL ラジオで絞った候補のみから抽選 (版は固定なので手動 LoRA も活かせる)
+                # SD15/SDXL/混合 ラジオで絞った候補のみから抽選
+                # 混合のときは generate.pick_checkpoint と同じく 25/75 (SD15/SDXL) で先に版を決める
                 random_pool = params.get("checkpoint_random_pool") or self.checkpoints
-                this_ckpt = random.choice(random_pool)
+                sd15_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sd15"]
+                sdxl_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sdxl"]
+                if sd15_sub and sdxl_sub:
+                    lane_pool = sd15_sub if random.random() < 0.25 else sdxl_sub
+                else:
+                    lane_pool = random_pool
+                this_ckpt = random.choice(lane_pool)
                 this_version = VERSION_BY_DIR.get(this_ckpt.parent, "sd15")
                 this_pool = (
                     self.loras_sd15 if this_version == "sd15" else self.loras_sdxl
@@ -1357,7 +1367,10 @@ class GenerateGUI:
                 continue
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            out_path = GENERATED_DIR / f"gui_{ts}_{i+1:04d}.png"
+            # 出力 dir は ckpt の版で振り分け (SD15=3_8 / SDXL=5_1)
+            gen_dir = SDXL_GENERATED_DIR if this_version == "sdxl" else SD15_GENERATED_DIR
+            gen_dir.mkdir(exist_ok=True)
+            out_path = gen_dir / f"gui_{ts}_{i+1:04d}.png"
             final_w = int(this_w * hires_scale) if params["hires_fix"] else this_w
             final_h = int(this_h * hires_scale) if params["hires_fix"] else this_h
 
@@ -1543,7 +1556,10 @@ class GenerateGUI:
     def _do_upscale_sync(
         self, path: Path, style: str, client_id: str,
     ) -> Optional[Path]:
-        """1 枚を Real-ESRGAN x4 アップスケールして 5_2_upscaled に保存。
+        """1 枚を Real-ESRGAN x4 アップスケールして保存先 dir は path の親 dir から判別:
+            3_8_SD15_generated → 3_9_SD15_upscaled
+            5_1_SDXL_generated → 5_2_SDXL_upscaled
+            それ以外 (旧 5_1_generated 等の手動入力含む) は SDXL_UPSCALED_DIR にフォールバック。
         失敗時は raise (caller がメッセージ処理)。worker (gen ループ内同期) で利用。
         ソース PNG (path) に A1111 parameters chunk があれば upscale 後に複写
         (Size フィールドのみ新解像度に書き換え)。"""
@@ -1566,8 +1582,13 @@ class GenerateGUI:
         img_bytes, _info, _ = _submit_and_fetch(workflow, client_id)
         if img_bytes is None:
             return None
-        UPSCALED_DIR.mkdir(exist_ok=True)
-        out_path = UPSCALED_DIR / path.name
+        # 親 dir から版を判別 (SD15_GENERATED_DIR or 旧 3_9_SD15_rough → SD15、それ以外 → SDXL)
+        if path.parent == SD15_GENERATED_DIR:
+            up_dir = SD15_UPSCALED_DIR
+        else:
+            up_dir = SDXL_UPSCALED_DIR
+        up_dir.mkdir(exist_ok=True)
+        out_path = up_dir / path.name
         out_path.write_bytes(img_bytes)
 
         # ソース PNG の A1111 parameters chunk を複写。Size だけ新解像度に書き換える
