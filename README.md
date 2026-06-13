@@ -34,6 +34,15 @@ python -m venv .venv
 pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # Remaining dependencies
 pip install -r requirements.txt
+# ComfyUI
+git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI\custom_nodes
+git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack
+git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+cd ../..
+pip install -r ComfyUI\requirements.txt
+pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Pack\requirements.txt
+pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
 ```
 
 ### Linux/macOS
@@ -48,6 +57,15 @@ $ source .venv/bin/activate
 $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 # Remaining dependencies
 $ pip install -r requirements.txt
+# ComfyUI
+$ git clone https://github.com/comfyanonymous/ComfyUI
+$ cd ComfyUI/custom_nodes
+$ git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack
+$ git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+$ cd ../..
+$ pip install -r ComfyUI/requirements.txt
+$ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt
+$ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 ```
 
 ## Directory Layout
@@ -67,8 +85,8 @@ $ pip install -r requirements.txt
 - `4_2_SDXL_LoRA` : SDXL LoRA tensors
 - `4_3_SDXL_ControlNet` : SDXL ControlNet tensors
 - `4_4_SDXL_Embedding` : SDXL embedding tensors
-- `5_1_SDXL_generated` : Generated PNGs from SDXL checkpoints (with metadata) are written here
-- `5_2_SDXL_upscaled` : Upscaled SDXL PNGs (with metadata) are written here
+- `4_8_SDXL_generated` : Generated PNGs from SDXL checkpoints (with metadata) are written here
+- `4_9_SDXL_upscaled` : Upscaled SDXL PNGs (with metadata) are written here
 
 Tensors are auto-sorted by `tensors.py` into the SD15 (`3_x`) or SDXL (`4_x`) lane
 based on the model architecture detected from each file.
@@ -89,8 +107,8 @@ python dist_tensors.py
 python generate.py --sentence "a girl walking with umbrella in outside"
 ```
 
-Standard images are written to `5_1_SDXL_generated`,
-upscaled images to `5_2_SDXL_upscaled`.
+Standard images are written to `4_8_SDXL_generated`,
+upscaled images to `4_9_SDXL_upscaled`.
 
 
 ## Generation Flow (Overview)
@@ -100,39 +118,32 @@ A single image from `generate.py` roughly follows the flow below (terms are deta
 ```mermaid
 flowchart TD
   P["Get prompt<br/>--prompt auto / sentence / png / original"]
-  P --> CK["Unified checkpoint draw<br/>pool = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>weight = checkpoint.toml (slow/fast/like)"]
+  P --> CK["Checkpoint draw<br/>pool = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: pick lane 25/75 (SD15/SDXL) first,<br/>then weighted within lane<br/>weight = checkpoint.toml (slow/fast/like)"]
   CK --> V{"Version of the drawn checkpoint<br/>(its directory)"}
 
-  V -->|"SD15 / gear high"| DR1
-  V -->|"SD15 / gear low"| S1["SD15 single pass / rough (raw)"]
-  V -->|"SDXL"| S2["SDXL single pass"]
+  V -->|"SD15"| S1["SD15 single pass<br/>VAE override: sd-vae-ft-mse"]
+  V -->|"SDXL"| S2["SDXL single pass<br/>VAE override: sdxl-vae-fp16-fix"]
 
-  subgraph DR["Two-stage chain (draft → clean)"]
-    direction TB
-    DR1["1. Draft: SD15 ckpt+LoRA<br/>512 / no ADetailer/CN/upscale"]
-    DR1 --> DR2["2. Clean: draw an SDXL separately<br/>img2img from the draft<br/>1024 / denoise 0.45"]
-  end
-
-  DR2 --> FAM
+  S1 --> FAM
   S2 --> FAM
   FAM{"family?<br/>checkpoint.toml / filename"}
-  FAM -->|Pony| FP["auto-prepend score_9…<br/>allow Pony neg embeds"]
-  FAM -->|non-Pony| FN["no score prefix<br/>drop Pony neg embeds"]
+  FAM -->|Pony| FP["auto-prepend score_9…<br/>allow Pony neg embeds (cap 3)"]
+  FAM -->|non-Pony| FN["no score prefix<br/>drop Pony LoRAs/neg embeds"]
 
   FP --> HG{"gear high?"}
   FN --> HG
-  HG -->|high| AD["ADetailer<br/>person→face→hand→NSFW parts<br/>→ upscale x4"]
+  HG -->|high| AD["ADetailer<br/>person→face→hand (yolov8s)<br/>→ Real-ESRGAN x4 upscale"]
   HG -->|low| OUT
-  AD --> OUT["Output 5_1_SDXL_generated / 5_2_SDXL_upscaled<br/>meta: Pipeline / Draft model / Draft loras"]
-  S1 --> OUT
+  AD --> OUT["Output (per lane):<br/>SD15 → 3_8_SD15_generated / 3_9_SD15_upscaled<br/>SDXL → 4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>meta: Pipeline tag"]
 ```
 
 In words, the key points are:
 
-- **Checkpoints are drawn from a single pool**, and **the drawn version (SD15/SDXL) together with `--gear` decides the route.**
-- Only when an **SD15 checkpoint is drawn with `--gear high`** does the **two-stage chain** (SD15 draft → SDXL clean) kick in. Everything else is a single pass.
-- **In the SDXL stage the `family` is inspected**: Pony gets a score prefix + Pony neg embeds; non-Pony drops them.
-- **`--gear high`** runs ADetailer (person→face→hand→parts) and upscaling.
+- **Checkpoints are drawn lane-aware**: in `--version auto` the lane (SD15 / SDXL) is picked first at **25/75** probability, then a checkpoint is drawn weighted within that lane by `checkpoint.toml` fast/slow/like. With `--version sdxl` or `--version sd15` the lane is forced.
+- **Both SD15 and SDXL render in a single pass** (the old SD15 draft → SDXL clean two-stage chain was retired on 2026-06-13). Output PNGs and upscaled PNGs are written to lane-specific directories.
+- **Each lane uses a stable external VAE** auto-downloaded on first run (SDXL → `madebyollin/sdxl-vae-fp16-fix`, SD15 → `stabilityai/sd-vae-ft-mse-original`) — bundled checkpoint VAEs are bypassed to avoid color shift / fp16 overflow artifacts.
+- **`family` gating is applied uniformly** (CLI and GUI share the same `prepare_workflow_prompt` helper): Pony checkpoints get the score prefix + capped Pony neg embeds; non-Pony bases drop Pony LoRAs and Pony neg embeds.
+- **`--gear high`** runs ADetailer (`face_yolov8s` / `hand_yolov8s` / `person_yolov8s-seg`) and Real-ESRGAN x4 upscaling.
 
 (This diagram renders as-is on GitHub. It is Mermaid, so just edit this block when the behavior changes.)
 
@@ -235,7 +246,7 @@ python generate.py
 Generates images continuously.
 `tensors.py` is run first.
 
-PNGs with embedded metadata, named `YYYYMMDDHHMMSS.png`, are written to `5_1_SDXL_generated` and `5_2_SDXL_upscaled`.
+PNGs with embedded metadata, named `YYYYMMDDHHMMSS.png`, are written to `4_8_SDXL_generated` and `4_9_SDXL_upscaled`.
 
 After each image, there is a cooldown interval of (device temperature − 50) seconds.
 
@@ -265,7 +276,7 @@ A one-shot mode that lifts older SD15 images (and the like) toward SDXL-grade qu
 - LoRAs are drawn from the SDXL LoRAs using the PNG's LoRA keywords (or `--lora-keywords`).
 - `--refine-denoise <0.0–1.0>` : img2img denoise (default 0.5; low = faithful to the original / high = SDXL repaints more aggressively).
 - The resolution is scaled to roughly 1MP (SDXL-native) while preserving the original PNG's aspect ratio. `--gear high` adds ADetailer + upscaling; `--gear low` does refine only.
-- Output goes to `5_1_SDXL_generated` / `5_2_SDXL_upscaled`, and the `Pipeline` metadata records `refine (src:…, denoise…)`. **Generates one image and exits.**
+- Output goes to `4_8_SDXL_generated` / `4_9_SDXL_upscaled`, and the `Pipeline` metadata records `refine (src:…, denoise…)`. **Generates one image and exits.**
 
 ##### Checkpoint selection
 
@@ -323,15 +334,12 @@ LoRA keywords are also appended to the prompt text with weight `(0.8 / number_of
 
 #### Gear
 
-`--gear low` : Rough generation. Single pass, 30 inference steps, no ADetailer, no LoRA, no ControlNet, no upscaling. Even if the drawn checkpoint is SD15, it stays a single pass (for draft inspection).
-`--gear high` : Production generation. 50 inference steps, ADetailer on, LoRA selection, ControlNet selection, upscaling on. **It branches in two by the version of the drawn checkpoint:**
-- **SDXL drawn** → finish as a straight SDXL single pass.
-- **SD15 drawn** → draw a draft in SD15, then have SDXL repaint it via img2img — a two-stage process (see "Two-stage chain" below).
+`--gear low` : Rough generation. Single pass, 30 inference steps, no ADetailer, no LoRA, no ControlNet, no upscaling.
+`--gear high` : Production generation. 50 inference steps, ADetailer on, LoRA selection, ControlNet selection, upscaling on. Single pass for both SD15 and SDXL.
 
 `--gear high` is the default.
 
-You do not need to think about SD15 vs. SDXL; just choose "rough (low)" or "finish (high)".
-If SD15 is drawn during a finish, it automatically becomes "SD15 draft → SDXL clean".
+You do not need to think about SD15 vs. SDXL; just choose "rough (low)" or "finish (high)". Both versions render in a single pass (the old SD15 draft → SDXL clean two-stage chain was retired on 2026-06-13).
 
 #### Architecture
 
@@ -342,34 +350,21 @@ If SD15 is drawn during a finish, it automatically becomes "SD15 draft → SDXL 
 
 #### Version (checkpoint draw pool)
 
-`--version` only narrows the checkpoint draw pool; it does not fix the generation lane.
-The version of the drawn checkpoint (its directory) automatically decides single-stage vs. two-stage.
+`--version` narrows the checkpoint draw pool; both SD15 and SDXL render in a single pass.
 
-`--version auto` : Draw from a single pool merging SD15 (`3_1`) + SDXL (`4_1`), weighted by `checkpoint.toml` (default).
-`--version sdxl` : Draw only `4_1` SDXL.
-`--version sd15` : Draw only `3_1` SD15.
+`--version auto` : Treat SD15 (`3_1`) + SDXL (`4_1`) as a merged pool. **The lane is drawn first at 25/75 (SD15/SDXL)** and the checkpoint is then drawn weighted within that lane by `checkpoint.toml` (default).
+`--version sdxl` : Draw only from `4_1` SDXL.
+`--version sd15` : Draw only from `3_1` SD15.
 
 `--version auto` is the default.
 
-The merged-pool weights use the `checkpoint.toml` values as-is, without distinguishing SD15 / SDXL.
-SD15 generates fast and tends to get a higher weight, so use `like` to adjust manually if you want to reduce the bias.
-
-##### Two-stage chain (SD15 draft → SDXL clean)
-
-A two-stage pipeline triggered when an **SD15 checkpoint is drawn** under `--gear high`.
-It mass-produces roughs with SD15's vast LoRA assets and finishes them with SDXL's rendering power — a "draft → clean" workflow.
-
-1. **Draft:** generate with the drawn SD15 checkpoint + SD15 LoRAs (512, a raw rough with no ADetailer / ControlNet / upscaling).
-2. **Clean:** hand the draft to ComfyUI and repaint it via img2img with a separately drawn **SDXL** checkpoint + SDXL LoRAs (1024, with ADetailer / upscaling).
-
-`--chain-denoise <0.0–1.0>` : denoise of the clean img2img (default 0.45). Lower preserves the draft's composition and colors; higher lets SDXL repaint more.
-`--save-draft` / `--no-save-draft` : Save the intermediate SD15 draft to `3_9_SD15_rough` (**default ON**; `--no-save-draft` to turn it off).
+The within-lane weight reads `checkpoint.toml` separately for SD15 and SDXL, so the fast/slow scale difference between lanes no longer biases the draw (this was a known bug in the cross-lane `max_slow` weighting before 2026-06-13). The 25/75 SDXL-heavy split exists because the VAE override + single-pass unification made SDXL the everyday choice. Change `SD15_LANE_PROB` in `pick_checkpoint` to adjust.
 
 Resolution defaults follow the version (SD15 = 512 / SDXL = 1024; landscape `many` is SD15 = 768×512 / SDXL = 1216×832).
 Override with `--width` / `--height` / `--many-width` / `--many-height`.
 
-Which route was taken is visible in the `path:` line of the run log and the `Pipeline:` field of the output PNG metadata
-(e.g. `Pipeline: SD15→SDXL 2-stage (draft: … / clean: …, denoise 0.45)` for the chain, `Pipeline: SDXL single-pass` for a single pass).
+The route taken is visible in the `path:` line of the run log and the `Pipeline:` field of the output PNG metadata
+(e.g. `Pipeline: SDXL single-pass` / `Pipeline: SD15 single-pass`).
 
 #### LoRA
 
@@ -398,8 +393,8 @@ Dump the ComfyUI API workflow (node graph) that `generate.py` builds to a JSON f
 **Drag and drop** the resulting JSON onto the blank canvas of the ComfyUI WebUI (http://127.0.0.1:8188)
 and it expands into a node graph with automatic layout, letting you see the workflow the code actually built.
 
-`--dump-workflow` : Also save each submitted workflow to `workflow_dump/<timestamp>_<kind>.json` (**generation still runs as usual**). In the two-stage chain both the draft (`draft_sd15`) and the clean pass (`chain_clean`) are written; for refine, `refine` is written too.
-`--dump-only` : Only dump the workflow JSON; **do not** submit it to ComfyUI (inspect the graph without using the GPU). Writes one single-pass workflow and exits immediately (chain / refine are disabled).
+`--dump-workflow` : Also save each submitted workflow to `workflow_dump/<timestamp>_<kind>.json` (**generation still runs as usual**). For refine, `refine` is written.
+`--dump-only` : Only dump the workflow JSON; **do not** submit it to ComfyUI (inspect the graph without using the GPU). Writes one single-pass workflow and exits immediately (refine is disabled).
 
 ```
 # Dump one SDXL single-pass graph without using the GPU
@@ -407,7 +402,7 @@ python generate.py --dump-only --version sdxl
 # Adding --gear low drops ADetailer/upscale, giving the minimal graph (txt2img + LoRA) that is easiest to read
 ```
 
-Kinds are `sdxl_single` / `sd15_single` / `chain_clean` / `draft_sd15` / `refine`. `workflow_dump/` is gitignored.
+Kinds are `sdxl_single` / `sd15_single` / `refine`. `workflow_dump/` is gitignored.
 
 ### Tensor Info Viewer: tensors_view.py
 
@@ -471,7 +466,7 @@ Opened via "Settings…" on the main window. Values are persisted to `generate_g
 
 #### Upscaling (right-click)
 
-Right-click on a gallery thumbnail → "Upscale (Real-ESRGAN x4)" → choose **Anime (default)** or **Real**. `_upscale_worker` submits a standalone upscale workflow to ComfyUI and saves the result to `5_2_SDXL_upscaled/<original_name>.png`. The models (`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`) are auto-downloaded by `ensure_upscale_model` from the official xinntao GitHub releases when missing.
+Right-click on a gallery thumbnail → "Upscale (Real-ESRGAN x4)" → choose **Anime (default)** or **Real**. `_upscale_worker` submits a standalone upscale workflow to ComfyUI and saves the result to `4_9_SDXL_upscaled/<original_name>.png`. The models (`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`) are auto-downloaded by `ensure_upscale_model` from the official xinntao GitHub releases when missing.
 
 #### Auto-prepared dependencies
 
@@ -488,7 +483,7 @@ python gallery.py [--list]
 
 A Tkinter thumbnail gallery for generated PNGs. **Read-only** — no copy / no delete (guards against accidental writes).
 
-- Recursively scans three fixed directories: `3_9_SD15_rough` / `5_1_SDXL_generated` / `5_2_SDXL_upscaled`
+- Recursively scans four fixed directories: `3_8_SD15_generated` / `3_9_SD15_upscaled` / `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
 - Reads A1111-compatible metadata (parameters chunk) and shows thumbnails + metadata. SD15 / SDXL is color-coded based on the `Pipeline` field (falling back to `Size`)
 - Toggle between Icon view and List view (click column headers to sort; row thumbnail size is adjustable 24–128 px via slider)
 - Search (AND substring across name/model/loras/keywords/positive/pipeline) plus arch filter

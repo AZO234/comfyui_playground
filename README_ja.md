@@ -56,13 +56,13 @@ $ pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvisi
 $ pip install -r requirements.txt
 # ComfyUI
 $ git clone https://github.com/comfyanonymous/ComfyUI
-$ cd ComfyUI\custom_nodes
+$ cd ComfyUI/custom_nodes
 $ git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack
 $ git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack
 $ cd ../.. 
-$ pip install -r ComfyUI\requirements.txt
-$ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Pack\requirements.txt
-$ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
+$ pip install -r ComfyUI/requirements.txt
+$ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt
+$ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 ```
 
 ## ディレクトリ構成
@@ -82,8 +82,8 @@ $ pip install -r ComfyUI\custom_nodes\ComfyUI-Impact-Subpack\requirements.txt
 - `4_2_SDXL_LoRA` ： SDXL LoRA テンソル
 - `4_3_SDXL_ControlNet` ： SDXL ControlNet テンソル
 - `4_4_SDXL_Embedding` ： SDXL Embedding テンソル
-- `5_1_SDXL_generated` ： 生成された PNG画像（メタ入り） が出力される
-- `5_2_SDXL_upscaled` ： アップスケールされた PNG画像（メタ入り） が出力される
+- `4_8_SDXL_generated` ： 生成された PNG画像（メタ入り） が出力される
+- `4_9_SDXL_upscaled` ： アップスケールされた PNG画像（メタ入り） が出力される
 
 テンソルは `tensors.py` が各ファイルの判定アーキテクチャに応じて
 SD15 (`3_x`) / SDXL (`4_x`) レーンへ自動振り分けする。
@@ -104,8 +104,8 @@ python dist_tensors.py
 python generate.py --sentence "a girl walking with umbrella in outside"
 ```
 
-`5_1_SDXL_generated` に通常画像、  
-`5_2_SDXL_upscaled` にアップスケール画像が生成されます。
+`4_8_SDXL_generated` に通常画像、  
+`4_9_SDXL_upscaled` にアップスケール画像が生成されます。
 
 
 ## 生成フロー（概念図）
@@ -115,39 +115,32 @@ python generate.py --sentence "a girl walking with umbrella in outside"
 ```mermaid
 flowchart TD
   P["プロンプト取得<br/>--prompt auto / sentence / png / original"]
-  P --> CK["checkpoint 統合抽選<br/>プール = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>重み = checkpoint.toml (slow/fast/like)"]
+  P --> CK["checkpoint 抽選<br/>プール = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: 先に 25/75 (SD15/SDXL) で版を抽選 →<br/>版内で重み付き抽選<br/>重み = checkpoint.toml (slow/fast/like)"]
   CK --> V{"当選 checkpoint の版<br/>(置き場 dir)"}
 
-  V -->|"SD15・gear high"| DR1
-  V -->|"SD15・gear low"| S1["SD15 1パス・ラフ（素）"]
-  V -->|"SDXL"| S2["SDXL 1パス"]
+  V -->|"SD15"| S1["SD15 1 発描き<br/>VAE 差し替え: sd-vae-ft-mse"]
+  V -->|"SDXL"| S2["SDXL 1 発描き<br/>VAE 差し替え: sdxl-vae-fp16-fix"]
 
-  subgraph DR["2段チェーン（下書き→清書）"]
-    direction TB
-    DR1["① 下書き: SD15 ckpt+LoRA<br/>512・ADetailer/CN/upscale なし"]
-    DR1 --> DR2["② 清書: SDXL を別抽選<br/>下書きを init に img2img<br/>1024・denoise 0.45"]
-  end
-
-  DR2 --> FAM
+  S1 --> FAM
   S2 --> FAM
   FAM{"family?<br/>checkpoint.toml / ファイル名"}
-  FAM -->|Pony| FP["score_9… 自動前置<br/>Pony neg embed 通す"]
-  FAM -->|非Pony| FN["score なし<br/>Pony neg embed 除外"]
+  FAM -->|Pony| FP["score_9… 自動前置<br/>Pony neg embed 通す (上限 3)"]
+  FAM -->|非Pony| FN["score なし<br/>Pony LoRA/neg embed 除外"]
 
   FP --> HG{"gear high?"}
   FN --> HG
-  HG -->|high| AD["ADetailer<br/>person→face→hand→NSFW部位<br/>→ upscale x4"]
+  HG -->|high| AD["ADetailer<br/>person→face→hand (yolov8s)<br/>→ Real-ESRGAN x4 upscale"]
   HG -->|low| OUT
-  AD --> OUT["出力 5_1_SDXL_generated / 5_2_SDXL_upscaled<br/>メタ: Pipeline / Draft model / Draft loras"]
-  S1 --> OUT
+  AD --> OUT["出力 (版別):<br/>SD15 → 3_8_SD15_generated / 3_9_SD15_upscaled<br/>SDXL → 4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>メタ: Pipeline タグ"]
 ```
 
 要点だけ言葉にすると:
 
-- **checkpoint を 1 プールで抽選**し、**当選した版（SD15/SDXL）と `--gear` で経路が決まる**。
-- **SD15 が当選 + `--gear high`** のときだけ **2 段チェーン**（SD15 下書き → SDXL 清書）になる。それ以外は 1 パス。
-- **SDXL 段では `family` を見て**、Pony なら score 前置 + Pony neg、非 Pony なら除外。
-- **`--gear high`** で ADetailer（person→face→hand→部位）と upscale が走る。
+- **checkpoint は版を意識した抽選**: `--version auto` のときは **25/75** (SD15/SDXL) で先に版を決め、版内で `checkpoint.toml` の fast/slow/like を重みに抽選する。`--version sdxl` / `--version sd15` で固定すれば版指定。
+- **SD15 / SDXL とも 1 発描き** (2026-06-13 に旧 2 段チェーン SD15 下書き→SDXL 清書 は撤回)。出力 PNG とアップスケール PNG は版別 dir に書き出す。
+- **各版とも安定 VAE を初回起動時に自動 DL** して使う (SDXL → `madebyollin/sdxl-vae-fp16-fix`、SD15 → `stabilityai/sd-vae-ft-mse-original`)。checkpoint 同梱 VAE の色シフトや fp16 オーバーフローによる劣化を回避する。
+- **`family` ゲートは CLI / GUI 共通**で適用される (`prepare_workflow_prompt` ヘルパに集約)。Pony checkpoint は score 前置 + Pony neg embed (上限 3) を通し、非 Pony base は Pony LoRA / Pony neg embed を全て除外する。
+- **`--gear high`** で ADetailer (`face_yolov8s` / `hand_yolov8s` / `person_yolov8s-seg`) と Real-ESRGAN x4 upscale が走る。
 
 （GitHub 上ではこの図がそのままレンダリングされる。Mermaid 記法なので、仕様変更時はこのブロックを直せばよい。）
 
@@ -250,7 +243,7 @@ python generate.py
 画像を連続で生成する。
 生成前に、tensors.py が実行される。
 
-メタ情報入り画像 `YYYYMMDDHHMMSS.png` が `5_1_SDXL_generated`・`5_2_SDXL_upscaled` ディレクトリに出力される。  
+メタ情報入り画像 `YYYYMMDDHHMMSS.png` が `4_8_SDXL_generated`・`4_9_SDXL_upscaled` ディレクトリに出力される。  
 
 画像生成後、(デバイス温度-50)秒、冷却インターバル。  
 
@@ -280,7 +273,7 @@ Ctrl+Cで終了。
 - LoRA は PNG の LoRAキーワード（or `--lora-keywords`）から SDXL LoRA を抽選。
 - `--refine-denoise <0.0〜1.0>` ： img2img の denoise（既定 0.5。低=元に忠実 / 高=SDXL が大きく描き直す）。
 - 解像度は元 PNG のアスペクトを保って約 1MP（SDXL ネイティブ）にスケール。`--gear high` で ADetailer + アップスケール、`--gear low` は refine のみ。
-- 出力は `5_1_SDXL_generated` / `5_2_SDXL_upscaled`、メタの `Pipeline` に `refine (src:…, denoise…)` を記録。**1 枚生成して終了**。
+- 出力は `4_8_SDXL_generated` / `4_9_SDXL_upscaled`、メタの `Pipeline` に `refine (src:…, denoise…)` を記録。**1 枚生成して終了**。
 
 ##### チェックポイント抽選方式
 
@@ -340,15 +333,13 @@ LoRAキーワードは、(0.8/LoRAキーワード数)*LoRAキーワード、と�
 
 #### ギア
 
-`--gear low` ： ラフ生成。1パス・推論数30・ADetailer無し・LoRA無し・ControlNet無し・アップスケールなし。当選 checkpoint が SD15 でも 1パス（下書き確認用）。
-`--gear high` ： 本番生成。推論数50・ADetailerあり・LoRA抽選・ControlNet抽選・アップスケールあり。**当選した checkpoint の版で 2通りに分岐する**：
-- **SDXL 当選** → そのまま SDXL 1パスで仕上げる。
-- **SD15 当選** → SD15 で下書きを描き、その絵を SDXL が img2img で清書する 2段処理（後述「2段チェーン」）。
+`--gear low` ： ラフ生成。1パス・推論数30・ADetailer無し・LoRA無し・ControlNet無し・アップスケールなし。
+`--gear high` ： 本番生成。推論数50・ADetailerあり・LoRA抽選・ControlNet抽選・アップスケールあり。SD15 / SDXL とも 1 発描き。
 
 `--gear high` が規定。
 
 SD15・SDXL を意識する必要はなく、「ラフ（low）か仕上げ（high）か」だけ指定すればよい。
-仕上げで SD15 が当選すれば自動的に「SD15 下書き → SDXL 清書」になる。
+SD15 / SDXL とも当選した版で 1 発描き（2026-06-13 に旧 2 段チェーンは撤回）。
 
 #### アーキテクチャ
 
@@ -359,34 +350,21 @@ SD15・SDXL を意識する必要はなく、「ラフ（low）か仕上げ（hi
 
 #### バージョン（checkpoint 抽選プール）
 
-`--version` は checkpoint の抽選プールを絞り込むだけで、生成レーンを固定するものではない。
-当選した checkpoint の版（置き場ディレクトリ）で 1段 / 2段が自動的に決まる。
+`--version` は checkpoint の抽選プールを絞り込み、当選した版で 1 発描きする。
 
-`--version auto` ： SD15（`3_1`）+ SDXL（`4_1`）を統合した 1プールから `checkpoint.toml` の重みで抽選（既定）。
+`--version auto` ： SD15（`3_1`）+ SDXL（`4_1`）を統合プールとして扱い、**先に 25/75 (SD15/SDXL) で版を抽選**してから版内で `checkpoint.toml` の重みで抽選する（既定）。
 `--version sdxl` ： `4_1` SDXL のみを抽選。
 `--version sd15` ： `3_1` SD15 のみを抽選。
 
 `--version auto` が規定。
 
-統合プールの重みは SD15 / SDXL を区別せず `checkpoint.toml` の値をそのまま使う。
-SD15 は生成が速く重みが高くなりやすいので、偏りを抑えたい場合は `like` で手動調整する。
-
-##### 2段チェーン（SD15 下書き → SDXL 清書）
-
-`--gear high` で **SD15 checkpoint が当選**したときに起動する 2段パイプライン。
-SD15 の膨大な LoRA 資産でラフを量産し、SDXL の画力で仕上げる「下書き → 清書」運用。
-
-1. **下書き**：当選した SD15 checkpoint + SD15 LoRA で生成（512、ADetailer / ControlNet / アップスケール無しの素のラフ）。
-2. **清書**：下書きを ComfyUI に渡し、別途抽選した **SDXL** checkpoint + SDXL LoRA で img2img 再描画（1024、ADetailer / アップスケール適用）。
-
-`--chain-denoise <0.0〜1.0>` ： 清書 img2img の denoise（既定 0.45）。低いほど下書きの構図・色を保持し、高いほど SDXL が大きく描き直す。
-`--save-draft` / `--no-save-draft` ： 中間の SD15 下書きを `3_9_SD15_rough` に保存（**既定 ON**、`--no-save-draft` で OFF）。
+統合プールの重みは**版内**で `checkpoint.toml` の値を見るので、SD15 / SDXL 間の fast/slow スケール差で偏ることはない（旧版は横断 max_slow で偏っていたが 2026-06-13 修正）。SDXL 偏重の 25/75 にしているのは VAE 安定化 + 1 発描き統一で SDXL が常用となったため。確率を変えたいときは `pick_checkpoint` 内 `SD15_LANE_PROB` を編集する。
 
 解像度の既定は版に追従する（SD15=512 / SDXL=1024、横長 many は SD15=768×512 / SDXL=1216×832）。
 `--width` / `--height` / `--many-width` / `--many-height` で上書き可能。
 
 どの経路を通ったかは、実行ログの `path:` 行と、出力 PNG のメタ情報 `Pipeline:` フィールドで確認できる
-（メタは英語で統一。例: `Pipeline: SD15→SDXL 2-stage (draft: … / clean: …, denoise 0.45)` / `Pipeline: SDXL single-pass`）。
+（メタは英語で統一。例: `Pipeline: SDXL single-pass` / `Pipeline: SD15 single-pass`）。
 
 #### LoRA
 
@@ -414,8 +392,8 @@ ControlNetは、既定では、`checkpoint.toml` の `style` が、
 出力 JSON を ComfyUI WebUI（http://127.0.0.1:8188）の黒いキャンバスに**ドラッグ＆ドロップ**すると、
 自動レイアウトでノードグラフに展開され、「コードが実際に組んだ workflow」を絵で確認できる。
 
-`--dump-workflow` ： 投入する workflow を `workflow_dump/<時刻>_<種別>.json` にも保存する（**生成は通常通り実行**）。2段チェーンでは下書き（`draft_sd15`）と清書（`chain_clean`）の両方、refine では `refine` も書き出す。
-`--dump-only` ： workflow JSON を吐くだけで ComfyUI へは**投入しない**（GPU を使わずグラフだけ確認）。1 枚分の単一パス workflow を書き出して即終了する（chain / refine は無効化）。
+`--dump-workflow` ： 投入する workflow を `workflow_dump/<時刻>_<種別>.json` にも保存する（**生成は通常通り実行**）。refine では `refine` も書き出す。
+`--dump-only` ： workflow JSON を吐くだけで ComfyUI へは**投入しない**（GPU を使わずグラフだけ確認）。1 枚分の単一パス workflow を書き出して即終了する（refine は無効化）。
 
 ```
 # GPU を使わず、SDXL 単一パスのグラフを 1 個吐く
@@ -423,7 +401,7 @@ python generate.py --dump-only --version sdxl
 # --gear low を足すと ADetailer/upscale が外れて最小グラフ（txt2img + LoRA）になり構造が読みやすい
 ```
 
-種別は `sdxl_single` / `sd15_single` / `chain_clean` / `draft_sd15` / `refine`。`workflow_dump/` は `.gitignore` 済み。
+種別は `sdxl_single` / `sd15_single` / `refine`。`workflow_dump/` は `.gitignore` 済み。
 
 ### テンソル情報ビューア tensors_view.py
 
@@ -487,7 +465,7 @@ python generate_gui.py
 
 #### アップスケール（右クリック）
 
-ギャラリー上で右クリック → 「アップスケール（Real-ESRGAN x4）」→ **アニメ（既定）** または **実写** を選択。`_upscale_worker` が ComfyUI に upscale 専用 workflow を投入し、`5_2_SDXL_upscaled/<元名>.png` に保存。モデル（`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`）は無ければ公式 GitHub release から `ensure_upscale_model` が自動 DL。
+ギャラリー上で右クリック → 「アップスケール（Real-ESRGAN x4）」→ **アニメ（既定）** または **実写** を選択。`_upscale_worker` が ComfyUI に upscale 専用 workflow を投入し、`4_9_SDXL_upscaled/<元名>.png` に保存。モデル（`RealESRGAN_x4plus_anime_6B.pth` / `RealESRGAN_x4plus.pth`）は無ければ公式 GitHub release から `ensure_upscale_model` が自動 DL。
 
 #### 自動化される下準備
 
@@ -504,7 +482,7 @@ python gallery.py [--list]
 
 生成済み PNG をサムネイル一覧する Tkinter ビューア。**閲覧専用**（コピー・削除なし、誤操作防止）。
 
-- 固定 4 ディレクトリを再帰走査： `3_8_SD15_generated` / `3_9_SD15_upscaled` / `5_1_SDXL_generated` / `5_2_SDXL_upscaled`
+- 固定 4 ディレクトリを再帰走査： `3_8_SD15_generated` / `3_9_SD15_upscaled` / `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
 - A1111 互換メタ（parameters chunk）を読んでサムネ + メタ一覧表示。`Pipeline` フィールド優先で SD15 / SDXL を色分け（無ければ Size で補完）
 - アイコン view / リスト view を切替（列ヘッダクリックでソート、行サムネはスライダーで 24-128 px 可変）
 - 検索（name/model/loras/keywords/positive/pipeline の AND 部分一致）+ アーキフィルタ

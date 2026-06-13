@@ -7,7 +7,7 @@
                                   ◀── GET /view?filename ──
     各 source ループで:
         prompt.toml → build_prompt → checkpoint 抽選 → workflow JSON 組立 →
-        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 5_1_SDXL_generated / 3_8_SD15_generated に保存
+        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 4_8_SDXL_generated / 3_8_SD15_generated に保存
 
 前提:
     `python ComfyUI/main.py --listen 127.0.0.1 --port 8188` で ComfyUI が常駐している
@@ -18,7 +18,7 @@ Phase 1 実装範囲:
     - 単純 SDXL txt2img (LoRA / ControlNet / ADetailer / upscale なし)
     - checkpoint は 4_1_SDXL_checkpoint (sd15 時 3_1_SD15_checkpoint) からランダム
     - Ctrl+C でループ停止
-    - A1111 互換メタを 5_1_SDXL_generated/{YYYYMMDDHHMMSS}.png (SDXL) または
+    - A1111 互換メタを 4_8_SDXL_generated/{YYYYMMDDHHMMSS}.png (SDXL) または
       3_8_SD15_generated/ (SD15) に書き込み
 """
 from __future__ import annotations
@@ -84,8 +84,8 @@ PROMPTS_DIR      = ROOT / "1_0_prompts"
 # 出力 dir は版ごとに分離 (SD15=3_8/3_9 / SDXL=5_1/5_2)。lane に応じて per-iteration で振り分ける
 SD15_GENERATED_DIR = ROOT / "3_8_SD15_generated"
 SD15_UPSCALED_DIR  = ROOT / "3_9_SD15_upscaled"
-SDXL_GENERATED_DIR = ROOT / "5_1_SDXL_generated"
-SDXL_UPSCALED_DIR  = ROOT / "5_2_SDXL_upscaled"
+SDXL_GENERATED_DIR = ROOT / "4_8_SDXL_generated"
+SDXL_UPSCALED_DIR  = ROOT / "4_9_SDXL_upscaled"
 WORKFLOW_DUMP_DIR = ROOT / "workflow_dump"   # --dump-workflow: 組んだ API workflow JSON の出力先
 CHECKPOINT_TOML  = ROOT / "checkpoint.toml"
 LORA_KEYWORDS_TOML = ROOT / "LoRA_keywords.toml"
@@ -1802,9 +1802,9 @@ def main() -> None:
                            "maximum number of stacked LoRAs per image (random.randint(min, max), default 5, "
                            "1 for no stacking, 0 to disable entirely)"))
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
-                    help=L("Real-ESRGAN x4 アップスケール (SDXL=5_2_SDXL_upscaled / SD15=3_9_SD15_upscaled に出力)。"
+                    help=L("Real-ESRGAN x4 アップスケール (SDXL=4_9_SDXL_upscaled / SD15=3_9_SD15_upscaled に出力)。"
                            "既定: gear high で ON / gear low で OFF。明示すれば上書き",
-                           "Real-ESRGAN x4 upscale (output to 5_2_SDXL_upscaled / 3_9_SD15_upscaled by lane). "
+                           "Real-ESRGAN x4 upscale (output to 4_9_SDXL_upscaled / 3_9_SD15_upscaled by lane). "
                            "Default: ON for gear high / OFF for gear low. Explicit flag overrides"))
     ap.add_argument("--upscale-model", type=str, default=None,
                     help=L("アップスケール用 Real-ESRGAN モデル名 (既定: style=anime → anime6B、"
@@ -2249,7 +2249,7 @@ def main() -> None:
             result = wait_for_completion_ws(prompt_id, client_id)
 
             outputs = result.get("outputs", {})
-            # node 7 = 通常解像度 (版に応じて 3_8_SD15_generated / 5_1_SDXL_generated)
+            # node 7 = 通常解像度 (版に応じて 3_8_SD15_generated / 4_8_SDXL_generated)
             save_node = outputs.get("7", {})
             images = save_node.get("images", [])
             if not images:
@@ -2291,7 +2291,7 @@ def main() -> None:
             if is_refine:
                 stop["flag"] = True  # --png refine は 1 枚で終了 (この後の upscale 保存まではやる)
 
-            # node 14 = アップスケール後 (版に応じて 3_9_SD15_upscaled / 5_2_SDXL_upscaled)
+            # node 14 = アップスケール後 (版に応じて 3_9_SD15_upscaled / 4_9_SDXL_upscaled)
             if upscale_model_name:
                 up_node = outputs.get("14", {})
                 up_images = up_node.get("images", [])

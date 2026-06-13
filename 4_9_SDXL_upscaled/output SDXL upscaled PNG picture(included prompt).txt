@@ -1,0 +1,1 @@
+output SDXL upscaled PNG picture(included prompt).

@@ -4,7 +4,7 @@
 generate.py の CLI ループに対する、手動指定・即時可視化版。
 - チェックポイント / LoRA / プロンプトを手で選び、1〜300 枚をまとめて生成。
 - *word* / **word** / ***word*** の重み記法は normalize_emphasis でそのまま使える。
-- 生成画像は版で分かれた dir (SDXL=5_1_SDXL_generated / SD15=3_8_SD15_generated) に
+- 生成画像は版で分かれた dir (SDXL=4_8_SDXL_generated / SD15=3_8_SD15_generated) に
   PNG + A1111 メタ付きで保存し、画面下段の
   サムネイル列に追記。サムネクリックでモーダルフルサイズ表示。
 
@@ -1558,7 +1558,7 @@ class GenerateGUI:
     ) -> Optional[Path]:
         """1 枚を Real-ESRGAN x4 アップスケールして保存先 dir は path の親 dir から判別:
             3_8_SD15_generated → 3_9_SD15_upscaled
-            5_1_SDXL_generated → 5_2_SDXL_upscaled
+            4_8_SDXL_generated → 4_9_SDXL_upscaled
             それ以外 (旧 5_1_generated 等の手動入力含む) は SDXL_UPSCALED_DIR にフォールバック。
         失敗時は raise (caller がメッセージ処理)。worker (gen ループ内同期) で利用。
         ソース PNG (path) に A1111 parameters chunk があれば upscale 後に複写

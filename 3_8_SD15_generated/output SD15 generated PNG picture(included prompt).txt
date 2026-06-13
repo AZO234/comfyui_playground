@@ -1,0 +1,1 @@
+output SD15 generated PNG picture(included prompt).

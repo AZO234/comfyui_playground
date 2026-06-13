@@ -49,8 +49,8 @@ ROOT = Path(__file__).resolve().parent
 VIEW_DIRS = [
     ROOT / "3_8_SD15_generated",
     ROOT / "3_9_SD15_upscaled",
-    ROOT / "5_1_SDXL_generated",
-    ROOT / "5_2_SDXL_upscaled",
+    ROOT / "4_8_SDXL_generated",
+    ROOT / "4_9_SDXL_upscaled",
 ]
 
 # サムネイル / プレビューの最大辺 (px)

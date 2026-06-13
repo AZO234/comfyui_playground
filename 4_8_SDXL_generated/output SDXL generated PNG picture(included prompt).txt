@@ -1,0 +1,1 @@
+output SDXL generated PNG picture(included prompt).
