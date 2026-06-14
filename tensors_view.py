@@ -10,17 +10,17 @@ JSON ヘッダは tensor名 → {dtype, shape, data_offsets} の辞書 + 特別�
 `__metadata__` (学習メタ等の文字列辞書) で構成される。tensor 本体はロードしない。
 
 表示するもの:
-  - テキスト: 種別(base/lora/embedding/controlnet)、base(SD15/SDXL)判定、
+  - テキスト: 種別(base/lora/embedding/controlnet)、
     ファイル/テンソル要約(数・パラメータ数・dtype)、LoRA のトリガー語(ss_tag_frequency)、
     学習メタ(ss_* / modelspec.*)、全テンソル一覧(name/shape/dtype)。
   - 画像: __metadata__ に data URI 形式の埋め込みサムネ(modelspec.thumbnail 等)が
     あれば表示 (現状ほぼ無いが将来対応)。
 
-UI 文字列は i18n の L() で英/日切替 (PLAYGROUND_LANG / OS ロケール)。
+UI 文字列は i18n の L() で英/日切替 (PLAYGROUND_LANG / OS ロケール)。real ブランチは SDXL only。
 
 使い方:
-    python tensors_view.py --dir 3_2_SD15_LoRA          # GUI を起動
-    python tensors_view.py --dir 3_2_SD15_LoRA --list    # GUI なしで一覧を標準出力
+    python tensors_view.py --dir 4_2_SDXL_LoRA          # GUI を起動
+    python tensors_view.py --dir 4_2_SDXL_LoRA --list    # GUI なしで一覧を標準出力
 """
 from __future__ import annotations
 
@@ -157,31 +157,18 @@ def classify(tensors: dict, stem: str) -> str:
 
 
 def detect_version(tensors: dict, meta: dict) -> str:
-    """SD15 / SDXL を判定。メタ優先 → テンソルの shape ヒューリスティク。不明は '?'。"""
+    """SDXL かを判定 (real ブランチは SDXL only、SD15 等は '?')。
+    メタ優先 → テンソルの shape ヒューリスティク。"""
     arch = f"{meta.get('modelspec.architecture', '')} {meta.get('ss_base_model_version', '')}".lower()
     if "xl" in arch:
         return "sdxl"
-    if arch.strip() and any(t in arch for t in ("v1-5", "sd_v1", "v1/", "1.5", "sd1")):
-        return "sd15"
     keys = list(tensors.keys())
     if any("conditioner.embedders.1" in k or "text_encoder_2" in k or "_te2_" in k
            or "lora_te2_" in k or "clip_g" in k.lower() for k in keys):
         return "sdxl"
-    for k in keys:
-        if k.endswith(("to_k.weight", "to_q.weight",
-                       "to_k.lora_down.weight", "to_k.lora_A.weight")):
-            s = tensors[k].get("shape", [])
-            if s:
-                inner = s[-1]
-                if inner >= 1500:
-                    return "sdxl"
-                if 600 <= inner <= 800:
-                    return "sd15"
     last_dims = {s[-1] for k in keys if (s := tensors[k].get("shape", []))}
     if 1280 in last_dims or 2048 in last_dims:
         return "sdxl"
-    if 768 in last_dims:
-        return "sd15"
     return "?"
 
 
@@ -355,11 +342,10 @@ def default_dir() -> Optional[Path]:
 
 
 def load_preview_meta() -> tuple[dict, dict, list]:
-    """(cats_by_ver, prompts_by_ver, カテゴリ選択肢) を返す。torch 不要。
-    cats_by_ver / prompts_by_ver は {"sd15": {stem→...}, "sdxl": {stem→...}}。"""
+    """(cats, prompts, カテゴリ選択肢) を返す。torch 不要。"""
     import tomllib
-    cats_by_ver: dict = {"sd15": {}, "sdxl": {}}
-    prompts_by_ver: dict = {"sd15": {}, "sdxl": {}}
+    cats: dict = {}
+    prompts: dict = {}
     choices = list(DEFAULT_CATEGORIES)
     # 選択肢は preview_template.toml の [LoRA_preview_template] キーから (ハードコード吸収)
     if PREVIEW_SETTINGS_TOML.exists():
@@ -373,75 +359,55 @@ def load_preview_meta() -> tuple[dict, dict, list]:
     if PREVIEW_TOML.exists():
         try:
             data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
-            cats_by_ver["sd15"] = {str(k): str(v) for k, v in (data.get("SD15_categories") or {}).items()}
-            cats_by_ver["sdxl"] = {str(k): str(v) for k, v in (data.get("SDXL_categories") or {}).items()}
-            prompts_by_ver["sd15"] = {str(k): str(v) for k, v in (data.get("SD15_prompts") or {}).items()}
-            prompts_by_ver["sdxl"] = {str(k): str(v) for k, v in (data.get("SDXL_prompts") or {}).items()}
+            cats = {str(k): str(v) for k, v in (data.get("SDXL_categories") or {}).items()}
+            prompts = {str(k): str(v) for k, v in (data.get("SDXL_prompts") or {}).items()}
         except Exception:
             pass
-    return cats_by_ver, prompts_by_ver, choices
+    return cats, prompts, choices
 
 
-def save_preview_meta(stem: str, version: str, category: str, custom_prompt: str) -> None:
-    """LoRA_preview.toml の {SD15,SDXL}_{categories,prompts}[stem] を更新。"""
+def save_preview_meta(stem: str, category: str, custom_prompt: str) -> None:
+    """LoRA_preview.toml の SDXL_{categories,prompts}[stem] を更新。"""
     import tomllib
     import tomli_w
-    if version not in ("sd15", "sdxl"):
-        raise ValueError(f"unknown version: {version}")
     data: dict = {}
     if PREVIEW_TOML.exists():
         try:
             data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    prefix = "SD15" if version == "sd15" else "SDXL"
-    cats = dict(data.get(f"{prefix}_categories") or {})
-    prompts = dict(data.get(f"{prefix}_prompts") or {})
+    cats = dict(data.get("SDXL_categories") or {})
+    prompts = dict(data.get("SDXL_prompts") or {})
     cats[stem] = category
     cp = custom_prompt.strip()
     if cp:
         prompts[stem] = cp
     else:
         prompts.pop(stem, None)
-    data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
-    data[f"{prefix}_prompts"] = dict(sorted(prompts.items(), key=lambda kv: kv[0].lower()))
+    data["SDXL_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    data["SDXL_prompts"] = dict(sorted(prompts.items(), key=lambda kv: kv[0].lower()))
     with open(PREVIEW_TOML, "wb") as f:
         tomli_w.dump(data, f)
 
 
-def set_preview_categories(stems_by_ver: dict, category: str) -> None:
-    """version → [stem] の辞書を受け取り、両 section を 1 度の書き込みで一括更新。"""
+def set_preview_categories(stems: list[str], category: str) -> None:
+    """stem リストを受け取り、SDXL_categories を 1 度の書き込みで一括更新。"""
     import tomllib
     import tomli_w
+    if not stems:
+        return
     data: dict = {}
     if PREVIEW_TOML.exists():
         try:
             data = tomllib.loads(PREVIEW_TOML.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    for ver, stems in stems_by_ver.items():
-        if not stems or ver not in ("sd15", "sdxl"):
-            continue
-        prefix = "SD15" if ver == "sd15" else "SDXL"
-        cats = dict(data.get(f"{prefix}_categories") or {})
-        for s in stems:
-            cats[s] = category
-        data[f"{prefix}_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
+    cats = dict(data.get("SDXL_categories") or {})
+    for s in stems:
+        cats[s] = category
+    data["SDXL_categories"] = dict(sorted(cats.items(), key=lambda kv: kv[0].lower()))
     with open(PREVIEW_TOML, "wb") as f:
         tomli_w.dump(data, f)
-
-
-def _entry_version(entry) -> str:
-    """Entry の version を判定 (entry.base が sd15/sdxl ならそれを、不明なら親dirで補完、最終的に sd15)。"""
-    base = getattr(entry, "base", "")
-    if base in ("sd15", "sdxl"):
-        return base
-    parent = entry.path.parent.name
-    if parent.startswith("3_"):
-        return "sd15"
-    if parent.startswith("4_"):
-        return "sdxl"
-    return "sd15"
 
 
 # --------------------------------------------------------------------------- #
@@ -534,7 +500,8 @@ def run_gui(directory: Path) -> None:
             self._build_body()
 
             self.search_var.trace_add("write", self._on_search)
-            threading.Thread(target=self._scan_worker, daemon=True).start()
+            threading.Thread(target=self._scan_worker,
+                             args=(self.q, self.directory), daemon=True).start()
             self.after(80, self._drain_queue)
 
         # ---- レイアウト ------------------------------------------------- #
@@ -555,7 +522,7 @@ def run_gui(directory: Path) -> None:
 
             ttk.Label(bar, text="Base:").pack(side="left")
             base_cb = ttk.Combobox(bar, textvariable=self.base_var, width=6, state="readonly",
-                                   values=["All", "sdxl", "sd15", "?"])
+                                   values=["All", "sdxl", "?"])
             base_cb.pack(side="left", padx=(4, 12))
             base_cb.bind("<<ComboboxSelected>>", lambda *_: self._populate())
 
@@ -676,13 +643,16 @@ def run_gui(directory: Path) -> None:
             return txt
 
         # ---- スキャン --------------------------------------------------- #
-        def _scan_worker(self) -> None:
-            for p in iter_safetensors(self.directory):
+        def _scan_worker(self, q: queue.Queue, directory: Path) -> None:
+            """ディレクトリとキューはローカル束縛で受け取る (dir 切替時の race 対策)。
+            self.q / self.directory を見てしまうと、A スキャン中に B へ切替えたとき
+            A の残りエントリが B のキューに混入する。"""
+            for p in iter_safetensors(directory):
                 try:
-                    self.q.put(load_entry(p))
+                    q.put(load_entry(p))
                 except Exception:
                     continue
-            self.q.put(None)
+            q.put(None)
 
         def _drain_queue(self) -> None:
             added = False
@@ -830,7 +800,7 @@ def run_gui(directory: Path) -> None:
 
             # category: 単一 lora=その値 / 複数 lora=共通なら表示・違えば空
             if loras:
-                cset = {self.pv_cats.get(_entry_version(e), {}).get(e.path.stem, "ware") for e in loras}
+                cset = {self.pv_cats.get(e.path.stem, "ware") for e in loras}
                 self.cat_var.set(next(iter(cset)) if len(cset) == 1 else "")
             else:
                 self.cat_var.set("")
@@ -839,8 +809,7 @@ def run_gui(directory: Path) -> None:
             self.prompt_text.delete("1.0", "end")
             single_lora = (n == 1 and bool(loras))
             if single_lora:
-                v = _entry_version(loras[0])
-                self.prompt_text.insert("1.0", self.pv_prompts.get(v, {}).get(loras[0].path.stem, ""))
+                self.prompt_text.insert("1.0", self.pv_prompts.get(loras[0].path.stem, ""))
             self.cat_cb.configure(state="readonly" if loras else "disabled")
             self.prompt_text.configure(state="normal" if single_lora else "disabled")
             self.save_btn.configure(state="normal" if loras else "disabled")
@@ -867,27 +836,22 @@ def run_gui(directory: Path) -> None:
                 if len(self.selected_entries) == 1:
                     e = loras[0]
                     stem = e.path.stem
-                    ver = _entry_version(e)
                     cp = self.prompt_text.get("1.0", "end").strip()
-                    save_preview_meta(stem, ver, cat, cp)
-                    self.pv_cats.setdefault(ver, {})[stem] = cat
+                    save_preview_meta(stem, cat, cp)
+                    self.pv_cats[stem] = cat
                     if cp:
-                        self.pv_prompts.setdefault(ver, {})[stem] = cp
+                        self.pv_prompts[stem] = cp
                     else:
-                        self.pv_prompts.get(ver, {}).pop(stem, None)
-                    self.editor_status.set(L(f"保存 [{ver}]: {cat}" + ("＋custom" if cp else ""),
-                                             f"saved [{ver}]: {cat}" + (" +custom" if cp else "")))
+                        self.pv_prompts.pop(stem, None)
+                    self.editor_status.set(L(f"保存: {cat}" + ("＋custom" if cp else ""),
+                                             f"saved: {cat}" + (" +custom" if cp else "")))
                 else:
-                    stems_by_ver: dict = {}
-                    for e in loras:
-                        stems_by_ver.setdefault(_entry_version(e), []).append(e.path.stem)
-                    set_preview_categories(stems_by_ver, cat)
-                    for ver, stems in stems_by_ver.items():
-                        for s in stems:
-                            self.pv_cats.setdefault(ver, {})[s] = cat
-                    total = sum(len(v) for v in stems_by_ver.values())
-                    self.editor_status.set(L(f"{total} 件を {cat} に設定",
-                                             f"set {total} to {cat}"))
+                    stems = [e.path.stem for e in loras]
+                    set_preview_categories(stems, cat)
+                    for s in stems:
+                        self.pv_cats[s] = cat
+                    self.editor_status.set(L(f"{len(stems)} 件を {cat} に設定",
+                                             f"set {len(stems)} to {cat}"))
             except Exception as ex:
                 self.editor_status.set(L(f"保存失敗: {ex}", f"save failed: {ex}"))
 
@@ -1085,11 +1049,14 @@ def run_gui(directory: Path) -> None:
             self.selected = None
             self.loading = True
             self.status_var.set(L("読み込み中…", "Loading…"))
+            # 新しい Queue を割り当てる。旧スキャンスレッドは旧 Queue へ書き続けるが、
+            # こちらが参照しないので drain には来ない (GC で回収される)。
             self.q = queue.Queue()
             self._populate()
             self.title(L(f"テンソル情報ビューア — {self.directory}",
                          f"Tensor Info Viewer — {self.directory}"))
-            threading.Thread(target=self._scan_worker, daemon=True).start()
+            threading.Thread(target=self._scan_worker,
+                             args=(self.q, self.directory), daemon=True).start()
 
         def _project_root(self) -> Path:
             return Path(__file__).resolve().parent

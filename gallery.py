@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""gallery.py - 生成済み PNG をサムネイル一覧するデスクトップビューア (Tkinter)。
+"""gallery.py - 生成済み PNG をサムネイル一覧するデスクトップビューア (Tkinter)。real ブランチ = SDXL only。
 
-固定 4 ディレクトリ (SD15 / SDXL × 生成 / アップスケール) を再帰走査し、
+固定 2 ディレクトリ (4_8_SDXL_generated / 4_9_SDXL_upscaled) を再帰走査し、
 A1111 互換メタ (parameters chunk) を読み取ってサムネイル + メタ情報の一覧を表示する。
-名前 / 時刻 / アーキ(SD15·SDXL) / Model / Size でソート、テキスト検索でフィルタ、
+名前 / 時刻 / Model / Size でソート、テキスト検索でフィルタ、
 選択画像の全メタ表示、OS ビューアで開ける。
 
 **閲覧専用**: コピー・削除などの書き込み操作はサポートしない (誤操作防止)。
 画像の削除や移動は generate_gui.py のギャラリーやエクスプローラから行う。
 
 メタ読出は pngutil の read_text_chunks / parse_a1111_parameters を流用。
-SD15/SDXL の判定は parameters の `Pipeline` フィールド優先 + `Size` で補完。
 UI 文字列は i18n の L() で英/日切替 (PLAYGROUND_LANG / OS ロケール)。
 
 使い方:
-    python gallery.py                      # GUI ビューアを起動 (固定 4 dir)
+    python gallery.py                      # GUI ビューアを起動 (固定 2 dir)
     python gallery.py --list               # GUI なしでメタ一覧を標準出力
     python gallery.py --dir PATH [PATH...] # 任意のディレクトリを走査対象に差し替え
 """
@@ -44,11 +43,9 @@ except (AttributeError, OSError):
 
 ROOT = Path(__file__).resolve().parent
 
-# 閲覧対象の既定ディレクトリ (SD15 / SDXL × 生成 / upscaled の 4 dir を再帰走査して PNG を集める)
+# 閲覧対象の既定ディレクトリ (SDXL の生成 / upscaled 2 dir を再帰走査して PNG を集める)
 # `--dir PATH [PATH...]` 指定時はこの既定が差し替えられる (main() 参照)
 VIEW_DIRS = [
-    ROOT / "3_8_SD15_generated",
-    ROOT / "3_9_SD15_upscaled",
     ROOT / "4_8_SDXL_generated",
     ROOT / "4_9_SDXL_upscaled",
 ]
@@ -58,8 +55,6 @@ THUMB_SIZE = 200      # アイコン view の格子サムネ
 LIST_THUMB = 40       # リスト view の行サムネ (Treeview #0 列)
 PREVIEW_MAX = 480
 PAD = 6
-# アーキ表示色 (caption の文字色)
-ARCH_COLOR = {"SD15": "#2e7d32", "SDXL": "#1565c0", "?": "#777777"}
 
 
 # --------------------------------------------------------------------------- #
@@ -70,7 +65,6 @@ class Entry:
     """1 枚の PNG とその抽出済みメタ。thumb / widget は GUI 起動後に埋める。"""
     path: Path
     mtime: float
-    arch: str            # "SD15" / "SDXL" / "?"
     model: str
     loras: str
     lora_keywords: str
@@ -89,28 +83,6 @@ class Entry:
     widget: object = None       # サムネイルセルの Frame (GUI 時のみ)
 
 
-def detect_arch(params: dict) -> str:
-    """parameters の Pipeline / Size から SD15 か SDXL かを判定する。
-
-    Pipeline 例: 'SDXL single-pass' / 'SD15 single-pass' /
-                 'SD15→SDXL 2-stage (...)' / 'refine (...)'。
-    最終画像のアーキで分類するので 2-stage / refine は SDXL 扱い。
-    Pipeline 不在時は Size の最大辺 (>=1024 → SDXL) で補完。
-    """
-    pl = (params.get("Pipeline") or "").upper()
-    if pl:
-        if "SD15" in pl and "SDXL" not in pl and "2-STAGE" not in pl and "REFINE" not in pl:
-            return "SD15"
-        if "SDXL" in pl or "2-STAGE" in pl or "REFINE" in pl:
-            return "SDXL"
-    size = params.get("Size", "")
-    try:
-        w, h = size.lower().split("x")
-        return "SDXL" if max(int(w), int(h)) >= 1024 else "SD15"
-    except (ValueError, AttributeError):
-        return "?"
-
-
 def load_entry(path: Path) -> Optional[Entry]:
     """PNG からメタを抽出して Entry を作る。読めない PNG は None。"""
     try:
@@ -123,7 +95,6 @@ def load_entry(path: Path) -> Optional[Entry]:
     return Entry(
         path=path,
         mtime=mtime,
-        arch=detect_arch(params),
         model=params.get("Model", ""),
         loras=params.get("Loras", ""),
         lora_keywords=params.get("Lora keywords", ""),
@@ -169,7 +140,6 @@ def _columns() -> list:
     return [
         ("name",     L("名前", "Name"),     220, "w",      lambda e: e.path.name.lower(),     lambda e: e.path.name),
         ("time",     L("時刻", "Time"),      140, "w",      lambda e: e.mtime,                 fmt_time),
-        ("arch",     "Arch",                  55, "center", lambda e: e.arch,                  lambda e: e.arch),
         ("size",     "Size",                  95, "center", lambda e: e.size_str,              lambda e: e.size_str),
         ("model",    "Model",                190, "w",      lambda e: e.model.lower(),         lambda e: e.model),
         ("loras",    "LoRAs",                180, "w",      lambda e: e.loras.lower(),         lambda e: e.loras),
@@ -204,16 +174,12 @@ def run_list(directories) -> None:
     label = ", ".join(d.name for d in directories) if isinstance(directories, list) else str(directories)
     print(L(f"=== {label} : {len(entries)} 枚 ===",
             f"=== {label} : {len(entries)} images ==="))
-    n_xl = sum(e.arch == "SDXL" for e in entries)
-    n_15 = sum(e.arch == "SD15" for e in entries)
-    print(L(f"  SDXL: {n_xl} / SD15: {n_15} / 不明: {len(entries) - n_xl - n_15}",
-            f"  SDXL: {n_xl} / SD15: {n_15} / unknown: {len(entries) - n_xl - n_15}"))
-    print(f"{'time':<17} {'arch':<4} {'size':<10} {'model':<28} name")
+    print(f"{'time':<17} {'size':<10} {'model':<28} name")
     print("-" * 100)
     for e in entries:
         ts = datetime.fromtimestamp(e.mtime).strftime("%Y-%m-%d %H:%M")
         model = (e.model[:27] + "…") if len(e.model) > 28 else e.model
-        print(f"{ts:<17} {e.arch:<4} {e.size_str:<10} {model:<28} {e.path.name}")
+        print(f"{ts:<17} {e.size_str:<10} {model:<28} {e.path.name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -252,7 +218,6 @@ def run_gui(directories) -> None:
             self._thumb_job = None           # スライダー debounce 用 after id
 
             self.search_var = tk.StringVar()
-            self.arch_var = tk.StringVar(value="All")
             self.sort_var = tk.StringVar(value=self.collabel["time"])
             self.view_var = tk.StringVar(value="icon")   # "icon" / "list"
             self.desc_var = tk.BooleanVar(value=True)
@@ -274,12 +239,6 @@ def run_gui(directories) -> None:
             ttk.Label(bar, text=L("検索:", "Search:")).pack(side="left")
             ent = ttk.Entry(bar, textvariable=self.search_var, width=28)
             ent.pack(side="left", padx=(4, 12))
-
-            ttk.Label(bar, text=L("アーキ:", "Arch:")).pack(side="left")
-            arch = ttk.Combobox(bar, textvariable=self.arch_var, width=6, state="readonly",
-                                values=["All", "SDXL", "SD15", "?"])
-            arch.pack(side="left", padx=(4, 12))
-            arch.bind("<<ComboboxSelected>>", lambda *_: self._relayout())
 
             ttk.Label(bar, text=L("表示:", "View:")).pack(side="left")
             ttk.Radiobutton(bar, text=L("アイコン", "Icon"), value="icon",
@@ -354,8 +313,6 @@ def run_gui(directories) -> None:
             thsb.grid(row=1, column=0, sticky="ew")
             self.list_frame.rowconfigure(0, weight=1)
             self.list_frame.columnconfigure(0, weight=1)
-            self.tree.tag_configure("SD15", foreground="#2e7d32")
-            self.tree.tag_configure("SDXL", foreground="#1565c0")
             self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
             self.tree.bind("<Double-Button-1>", lambda _e: self._open_selected())
             self.tree.bind("<Button-3>", self._tree_popup)
@@ -417,7 +374,7 @@ def run_gui(directories) -> None:
             for e in self._visible_sorted():
                 self._ensure_sm(e)
                 iid = str(e.path)
-                self.tree.insert("", "end", iid=iid, tags=(e.arch,), image=(e.thumb_sm or ""),
+                self.tree.insert("", "end", iid=iid, image=(e.thumb_sm or ""),
                                  values=tuple(disp(e) for *_, disp in self.columns))
                 self.tree_iid[iid] = e
             if self.selected and str(self.selected.path) in self.tree_iid:
@@ -520,9 +477,8 @@ def run_gui(directories) -> None:
             img.pack()
             cap = (entry.path.name if len(entry.path.name) <= 24
                    else entry.path.name[:22] + "…")
-            txt = tk.Label(cell, text=f"{entry.arch}  {cap}", background="#1e1e1e",
-                           fg=ARCH_COLOR.get(entry.arch, "#cccccc"),
-                           font=("Segoe UI", 8))
+            txt = tk.Label(cell, text=cap, background="#1e1e1e",
+                           fg="#cccccc", font=("Segoe UI", 8))
             txt.pack()
             entry.widget = cell
             for w in (cell, img, txt):
@@ -533,10 +489,8 @@ def run_gui(directories) -> None:
 
         def _visible_sorted(self) -> list[Entry]:
             needle = self.search_var.get().strip().lower()
-            arch = self.arch_var.get()
             keyfn = self.colkey.get(self.sort_col, lambda e: e.mtime)
-            vis = [e for e in self.all_entries
-                   if _matches(e, needle) and (arch == "All" or e.arch == arch)]
+            vis = [e for e in self.all_entries if _matches(e, needle)]
             vis.sort(key=keyfn, reverse=self.desc_var.get())
             return vis
 
@@ -603,7 +557,6 @@ def run_gui(directories) -> None:
 
             lines = [
                 f"{entry.path.name}",
-                f"arch : {entry.arch}",
                 f"time : {datetime.fromtimestamp(entry.mtime):%Y-%m-%d %H:%M:%S}",
                 f"size : {entry.size_str}",
                 f"model: {entry.model}",

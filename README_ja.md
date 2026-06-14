@@ -72,21 +72,15 @@ $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 - `2_0_tensors` ： 種別不明なテンソルをユーザーが配置する（受入トレー）
 - `2_1_errortensors` ： 不正 / 破損 / 重複テンソル
 - `2_2_lowtensors` ： 発色しない・バグ画になる等、目視でダメと判断したテンソルの手動隔離（scan も生成も対象外）
-- `2_3_hightensors` ： 手に余るテンソルの手動隔離 — 別アーキ（AuraFlow / Flux / SD3 等）や現行 SDXL/SD15 パイプラインで扱えない重量級（scan も生成も対象外）
-- `3_1_SD15_checkpoint` ： SD15 checkpoint テンソル（ラフ / 量産レーン）
-- `3_2_SD15_LoRA` ： SD15 LoRA テンソル
-- `3_3_SD15_Embedding` ： SD15 Embedding テンソル
-- `3_8_SD15_generated` ： SD15 checkpoint で生成した PNG（メタ付き）が出力される
-- `3_9_SD15_upscaled` ： SD15 のアップスケール後 PNG（メタ付き）が出力される
-- `4_1_SDXL_checkpoint` ： SDXL checkpoint テンソル（本番レーン）
+- `2_3_hightensors` ： 手に余るテンソルの手動隔離 — 別アーキ（AuraFlow / Flux / SD3 等）や現行 SDXL パイプラインで扱えない重量級（scan も生成も対象外）
+- `4_1_SDXL_checkpoint` ： SDXL checkpoint テンソル
 - `4_2_SDXL_LoRA` ： SDXL LoRA テンソル
 - `4_3_SDXL_ControlNet` ： SDXL ControlNet テンソル
 - `4_4_SDXL_Embedding` ： SDXL Embedding テンソル
 - `4_8_SDXL_generated` ： 生成された PNG画像（メタ入り） が出力される
 - `4_9_SDXL_upscaled` ： アップスケールされた PNG画像（メタ入り） が出力される
 
-テンソルは `tensors.py` が各ファイルの判定アーキテクチャに応じて
-SD15 (`3_x`) / SDXL (`4_x`) レーンへ自動振り分けする。
+`real` ブランチは SDXL のみ。SD15 と判別されたテンソルは `dist_tensors.py` で `2_1_errortensors` に振り分けられる。`main` ブランチ（anime 用）は SD15 + SDXL の 2 レーン構成を維持。
 
 ## 一番簡単な使い方
 
@@ -115,15 +109,10 @@ python generate.py --sentence "a girl walking with umbrella in outside"
 ```mermaid
 flowchart TD
   P["プロンプト取得<br/>--prompt auto / sentence / png / original"]
-  P --> CK["checkpoint 抽選<br/>プール = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: 先に 25/75 (SD15/SDXL) で版を抽選 →<br/>版内で重み付き抽選<br/>重み = checkpoint.toml (slow/fast/like)"]
-  CK --> V{"当選 checkpoint の版<br/>(置き場 dir)"}
+  P --> CK["checkpoint 抽選 (4_1_SDXL_checkpoint)<br/>重み = checkpoint.toml (slow/fast/like)"]
+  CK --> S2["SDXL 1 発描き<br/>VAE 差し替え: sdxl-vae-fp16-fix"]
 
-  V -->|"SD15"| S1["SD15 1 発描き<br/>VAE 差し替え: sd-vae-ft-mse"]
-  V -->|"SDXL"| S2["SDXL 1 発描き<br/>VAE 差し替え: sdxl-vae-fp16-fix"]
-
-  S1 --> FAM
-  S2 --> FAM
-  FAM{"family?<br/>checkpoint.toml / ファイル名"}
+  S2 --> FAM{"family?<br/>checkpoint.toml / ファイル名"}
   FAM -->|Pony| FP["score_9… 自動前置<br/>Pony neg embed 通す (上限 3)"]
   FAM -->|非Pony| FN["score なし<br/>Pony LoRA/neg embed 除外"]
 
@@ -131,14 +120,14 @@ flowchart TD
   FN --> HG
   HG -->|high| AD["ADetailer<br/>person→face→hand (yolov8s)<br/>→ Real-ESRGAN x4 upscale"]
   HG -->|low| OUT
-  AD --> OUT["出力 (版別):<br/>SD15 → 3_8_SD15_generated / 3_9_SD15_upscaled<br/>SDXL → 4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>メタ: Pipeline タグ"]
+  AD --> OUT["出力:<br/>4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>メタ: Pipeline タグ"]
 ```
 
 要点だけ言葉にすると:
 
-- **checkpoint は版を意識した抽選**: `--version auto` のときは **25/75** (SD15/SDXL) で先に版を決め、版内で `checkpoint.toml` の fast/slow/like を重みに抽選する。`--version sdxl` / `--version sd15` で固定すれば版指定。
-- **SD15 / SDXL とも 1 発描き** (2026-06-13 に旧 2 段チェーン SD15 下書き→SDXL 清書 は撤回)。出力 PNG とアップスケール PNG は版別 dir に書き出す。
-- **各版とも安定 VAE を初回起動時に自動 DL** して使う (SDXL → `madebyollin/sdxl-vae-fp16-fix`、SD15 → `stabilityai/sd-vae-ft-mse-original`)。checkpoint 同梱 VAE の色シフトや fp16 オーバーフローによる劣化を回避する。
+- **checkpoint は `4_1_SDXL_checkpoint` から抽選**、`checkpoint.toml` の fast/slow/like で重み付け。`real` ブランチは SDXL のみで、SD15 テンソルは intake 時に `2_1_errortensors` に振り分けられる。
+- **SDXL 1 発描き**。
+- **安定 VAE** (`madebyollin/sdxl-vae-fp16-fix`) を初回起動時に自動 DL。checkpoint 同梱 VAE の round-trip 色シフト (茶色フィルム化) を回避。
 - **`family` ゲートは CLI / GUI 共通**で適用される (`prepare_workflow_prompt` ヘルパに集約)。Pony checkpoint は score 前置 + Pony neg embed (上限 3) を通し、非 Pony base は Pony LoRA / Pony neg embed を全て除外する。
 - **`--gear high`** で ADetailer (`face_yolov8s` / `hand_yolov8s` / `person_yolov8s-seg`) と Real-ESRGAN x4 upscale が走る。
 
@@ -258,8 +247,8 @@ Ctrl+Cで終了。
 
 - 指定なし（`--prompt auto` 規定）： prompt.toml からプロンプト文章・LoRAキーワードを生成して連続生成。読出画像なし。
 - `--sentence "<文章>" [--lora-keywords "kw,..."]` ： 文章 + LoRAキーワード（後述）で連続生成。読出画像なし。
-- `--png <PNG file>` ： **画質アップ refine**。その PNG の『画像』を SDXL img2img で描き直し、SD15→SDXL 画質へ引き上げる（**1 枚で終了**、後述）。
-- `--png-sentence <PNG file>` ： PNG の埋込プロンプト『文章』で連続生成（画像は使わない）。統合抽選で SD15→2段 or SDXL→1段。
+- `--png <PNG file>` ： **画質アップ refine**。その PNG の『画像』を SDXL img2img で描き直し、画質を引き上げる（**1 枚で終了**、後述）。
+- `--png-sentence <PNG file>` ： PNG の埋込プロンプト『文章』で連続生成（画像は使わない）。
 - `--prompt original --png-sentence <PNG file>` ： PNG メタの checkpoint・LoRA・プロンプト文章を全部流用して生成。
 
 **注意（挙動変更）**: 以前の `--png` は「PNG から文章を読んで新規生成」だったが、現在は
@@ -267,9 +256,9 @@ Ctrl+Cで終了。
 
 ##### 画質アップ refine（`--png`）
 
-過去の SD15 画像などを SDXL 画質へ引き上げる単発モード。
+過去の低品質画像などを SDXL 画質へ引き上げる単発モード。
 
-- 指定 PNG の画像を init に **SDXL の img2img** で描き直す。checkpoint は SDXL 専用プールから抽選（or `--checkpoint`）、family 連動（Pony なら score 前置 / Pony neg）。
+- 指定 PNG の画像を init に **SDXL の img2img** で描き直す。checkpoint は `4_1_SDXL_checkpoint` から抽選（or `--checkpoint`）、family 連動（Pony なら score 前置 / Pony neg）。
 - LoRA は PNG の LoRAキーワード（or `--lora-keywords`）から SDXL LoRA を抽選。
 - `--refine-denoise <0.0〜1.0>` ： img2img の denoise（既定 0.5。低=元に忠実 / 高=SDXL が大きく描き直す）。
 - 解像度は元 PNG のアスペクトを保って約 1MP（SDXL ネイティブ）にスケール。`--gear high` で ADetailer + アップスケール、`--gear low` は refine のみ。
@@ -279,10 +268,7 @@ Ctrl+Cで終了。
 
 `--checkpoint <checkpoint name>` ： チェックポイントを指定する。
 
-抽選の対象（プール）は `--version`（後述）で決まる。既定（`auto`）では SD15 + SDXL を統合した
-1プールから抽選し、当選した版で 1段 / 2段が自動的に決まる。
-
-プール内では、
+抽選の対象は `4_1_SDXL_checkpoint`。
 １度めは `checkpoint.toml` にないチェックポイントをランダムに使用し、
 ２度め以降は、2/3は `checkpoint.toml`（後述） にあるもの、1/3はないものを抽選する。
 
@@ -296,12 +282,12 @@ Ctrl+Cで終了。
 - `fast` ： １枚の生成にかかった最小時間(s)
 - `like` ： 好み、正負値
 - `inference` ： 追加する推論ステップ数、正負値
-- `style` ： "anime" or "real" or "mix" or ""（ControlNet・アップスケールモデル選択に使用）
+- `style` ： "real"（real ブランチ既定）/ "anime" / "mix" / ""（ControlNet・アップスケールモデル選択に使用）。`dist_tensors.py` で新規登録される checkpoint は `style = "real"` を既定にする。
 - `family` ： 系統 "pony" / "illustrious" / "real" / ""（Pony 制御に使用、後述「系統対応」）
 
 `--gear high`にて、画像が生成されたあと、
 チェックポイント名とするグループ名がなければ、
-`slow` = `fast` = 実測値(s)、`like = 0`、`inference = 0`、`style = ""`、
+`slow` = `fast` = 実測値(s)、`like = 0`、`inference = 0`、`style = "real"`、
 `family =` ファイル名からの推定値（pony/pdxl/pny→pony 等、判定不能は ""）、で追記する。
 `family` は外れることがあるので、目視で直す（特に Illustrious 系はファイル名から判別しにくい）。
 
@@ -312,7 +298,6 @@ Ctrl+Cで終了。
 
 - **Pony** → `score_9, score_8_up, …` を positive 先頭に自動前置、Pony 用 neg embedding を許可（ただし **3 個まで**、過剰ネガ抑制）。
 - **非 Pony** → Pony 専用 neg embedding（名前に `pony`/`pdxl`/`pny`）を**自動除外**（非 Pony に当てると色崩壊・主体消失するため）。汎用 neg embedding は系統問わず使う。
-- SD15 下書き段には Pony 系を一切付けない。
 
 ##### LoRAキーワード・抽選方式
 
@@ -334,12 +319,9 @@ LoRAキーワードは、(0.8/LoRAキーワード数)*LoRAキーワード、と�
 #### ギア
 
 `--gear low` ： ラフ生成。1パス・推論数30・ADetailer無し・LoRA無し・ControlNet無し・アップスケールなし。
-`--gear high` ： 本番生成。推論数50・ADetailerあり・LoRA抽選・ControlNet抽選・アップスケールあり。SD15 / SDXL とも 1 発描き。
+`--gear high` ： 本番生成。推論数50・ADetailerあり・LoRA抽選・ControlNet抽選・アップスケールあり。
 
 `--gear high` が規定。
-
-SD15・SDXL を意識する必要はなく、「ラフ（low）か仕上げ（high）か」だけ指定すればよい。
-SD15 / SDXL とも当選した版で 1 発描き（2026-06-13 に旧 2 段チェーンは撤回）。
 
 #### アーキテクチャ
 
@@ -348,23 +330,12 @@ SD15 / SDXL とも当選した版で 1 発描き（2026-06-13 に旧 2 段チェ
 
 `--arch cuda` が規定。
 
-#### バージョン（checkpoint 抽選プール）
+#### 解像度
 
-`--version` は checkpoint の抽選プールを絞り込み、当選した版で 1 発描きする。
-
-`--version auto` ： SD15（`3_1`）+ SDXL（`4_1`）を統合プールとして扱い、**先に 25/75 (SD15/SDXL) で版を抽選**してから版内で `checkpoint.toml` の重みで抽選する（既定）。
-`--version sdxl` ： `4_1` SDXL のみを抽選。
-`--version sd15` ： `3_1` SD15 のみを抽選。
-
-`--version auto` が規定。
-
-統合プールの重みは**版内**で `checkpoint.toml` の値を見るので、SD15 / SDXL 間の fast/slow スケール差で偏ることはない（旧版は横断 max_slow で偏っていたが 2026-06-13 修正）。SDXL 偏重の 25/75 にしているのは VAE 安定化 + 1 発描き統一で SDXL が常用となったため。確率を変えたいときは `pick_checkpoint` 内 `SD15_LANE_PROB` を編集する。
-
-解像度の既定は版に追従する（SD15=512 / SDXL=1024、横長 many は SD15=768×512 / SDXL=1216×832）。
+既定は SDXL ネイティブ 1024×1024（横長 many は 1216×832）。
 `--width` / `--height` / `--many-width` / `--many-height` で上書き可能。
 
-どの経路を通ったかは、実行ログの `path:` 行と、出力 PNG のメタ情報 `Pipeline:` フィールドで確認できる
-（メタは英語で統一。例: `Pipeline: SDXL single-pass` / `Pipeline: SD15 single-pass`）。
+出力 PNG のメタ情報 `Pipeline:` フィールドには `SDXL single-pass`（または `--png` 時は `refine (...)`）が記録される。
 
 #### LoRA
 
@@ -401,7 +372,7 @@ python generate.py --dump-only --version sdxl
 # --gear low を足すと ADetailer/upscale が外れて最小グラフ（txt2img + LoRA）になり構造が読みやすい
 ```
 
-種別は `sdxl_single` / `sd15_single` / `refine`。`workflow_dump/` は `.gitignore` 済み。
+種別は `sdxl_single` / `refine`。`workflow_dump/` は `.gitignore` 済み。
 
 ### テンソル情報ビューア tensors_view.py
 
@@ -415,7 +386,7 @@ python tensors_view.py [--dir <directory>] [--list]
 - ツールバーのディレクトリ選択コンボで `[tensors_dirs].list` の候補を切り替えて即再読込。
 - 検索・種別/Base フィルタ・並べ替えに対応。検索の「メタ込み」でメタデータ本文も対象になる。
 - サイドカープレビュー（`<name>.preview.png`、`make_previews.py` が生成）があれば右上に表示。プレビュー画像をクリックすると原寸ビューが開く（クリック / Esc で閉じる）。
-- LoRA 行を選ぶと右の「プレビュー設定」エディタでカテゴリ（`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown` …）とカスタムプロンプトを編集できる。複数行選択で一括カテゴリ設定も可能。SD15 / SDXL の振り分けは行ごとに自動判定。
+- LoRA 行を選ぶと右の「プレビュー設定」エディタでカテゴリ（`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown` …）とカスタムプロンプトを編集できる。複数行選択で一括カテゴリ設定も可能。
 - 「再生成」で `make_previews.py --files` をサブプロセスで呼び、選択したテンソルだけサイドカーを焼き直す。
 - 「サムネイル生成」でサイドカー未生成のテンソルを一括で焼く。
 - `--list` を付けると GUI を起動せず、ターミナルに一覧を出力する。
@@ -430,10 +401,10 @@ python tensors_view.py [--dir <directory>] [--list]
 
 #### サイドカー実体 LoRA_preview.toml
 
-LoRA ごとのカテゴリとカスタムプロンプトは SD15 / SDXL に分けて格納される（同名 stem の衝突を避けるため）。
+LoRA ごとのカテゴリとカスタムプロンプト:
 
-- `[SD15_categories]` / `[SDXL_categories]` ： `stem = "<category>"`
-- `[SD15_prompts]` / `[SDXL_prompts]` ： `stem = "<custom positive>"`（書かれていない LoRA は category の雛形のみで焼かれる）
+- `[SDXL_categories]` ： `stem = "<category>"`
+- `[SDXL_prompts]` ： `stem = "<custom positive>"`（書かれていない LoRA は category の雛形のみで焼かれる）
 
 `tensors.py` の起動時監査が新規 LoRA を `ware` で自動追記、実体の無い余剰エントリは警告で表示する（手編集の category を守るため自動削除はしない）。完全に整理したいときは `python make_previews.py --init-categories` を実行する。
 
@@ -447,11 +418,11 @@ python generate_gui.py
 
 #### メイン画面
 
-- **チェックポイント**：3_1_SD15_checkpoint と 4_1_SDXL_checkpoint を `[SD15] / [SDXL]` タグ付き combobox で選択。サムネ（`<name>.preview.png` サイドカー、`make_previews.py` 生成）を横に表示。クリックで原寸モーダル
+- **チェックポイント**：4_1_SDXL_checkpoint を combobox で選択。サムネ（`<name>.preview.png` サイドカー、`make_previews.py` 生成）を横に表示。クリックで原寸モーダル
 - **LoRA**：チェックポイント版に応じて 3_2 / 4_2 を自動フィルタ。Ctrl/Shift クリックの複数選択（標準 EXTENDED モード）。選択分のサムネを下段に列表示（各サムネクリックで原寸モーダル）
 - **ControlNet / Embedding**：横並び 2 列リスト。ControlNet は SDXL のみ（4_3、単一選択）。Embedding は版で切替（3_3 or 4_4、複数選択）。Embedding は negative プロンプトの先頭に `embedding:<stem>` として自動連結（ComfyUI ネイティブ構文）
 - **プロンプト**：複数行テキストエリア（`*word*` / `**word**` / `***word***` の compel 重み記法対応）
-- **推論数 / OpenPose / 設定… ボタン / 画像生成 / 停止**：1 行コントロール。`推論数 1-300` = 生成枚数（各回 seed ランダム）。SD15 選択時は OpenPose 自動無効化（ControlNet 4_3 は SDXL のみのため）
+- **推論数 / OpenPose / 設定… ボタン / 画像生成 / 停止**：1 行コントロール。`推論数 1-300` = 生成枚数（各回 seed ランダム）
 - **ギャラリー**（下段）：生成完了するたびにサムネ追加。**クリックで原寸モーダル**、**右クリックメニュー**で「削除」「アップスケール（アニメ / 実写）」
 - **マウスホイール**：ギャラリーを縦スクロール
 
@@ -482,8 +453,8 @@ python gallery.py [--list]
 
 生成済み PNG をサムネイル一覧する Tkinter ビューア。**閲覧専用**（コピー・削除なし、誤操作防止）。
 
-- 固定 4 ディレクトリを再帰走査： `3_8_SD15_generated` / `3_9_SD15_upscaled` / `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
-- A1111 互換メタ（parameters chunk）を読んでサムネ + メタ一覧表示。`Pipeline` フィールド優先で SD15 / SDXL を色分け（無ければ Size で補完）
+- 固定 2 ディレクトリを再帰走査： `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
+- A1111 互換メタ（parameters chunk）を読んでサムネ + メタ一覧表示
 - アイコン view / リスト view を切替（列ヘッダクリックでソート、行サムネはスライダーで 24-128 px 可変）
 - 検索（name/model/loras/keywords/positive/pipeline の AND 部分一致）+ アーキフィルタ
 - 右パネル：大プレビュー + 全 params + positive/negative + 「開く」（OS ビューアで開く）

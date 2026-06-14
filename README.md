@@ -75,21 +75,16 @@ $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 - `2_0_tensors` : Drop unclassified tensors here (intake tray)
 - `2_1_errortensors` : Invalid / broken / duplicate tensors
 - `2_2_lowtensors` : Manual quarantine for tensors you judge bad by eye (no color, buggy output, etc.) — excluded from both scanning and generation
-- `2_3_hightensors` : Manual quarantine for tensors out of scope — different architecture (AuraFlow / Flux / SD3 etc.) or simply too heavy for the current SDXL/SD15 pipeline — excluded from both scanning and generation
-- `3_1_SD15_checkpoint` : SD15 checkpoint tensors (rough / high-volume lane)
-- `3_2_SD15_LoRA` : SD15 LoRA tensors
-- `3_3_SD15_Embedding` : SD15 embedding tensors
-- `3_8_SD15_generated` : Generated PNGs from SD15 checkpoints (with metadata) are written here
-- `3_9_SD15_upscaled` : Upscaled SD15 PNGs (with metadata) are written here
-- `4_1_SDXL_checkpoint` : SDXL checkpoint tensors (production lane)
+- `2_3_hightensors` : Manual quarantine for tensors out of scope — different architecture (AuraFlow / Flux / SD3 etc.) or simply too heavy for the current SDXL pipeline — excluded from both scanning and generation
+- `4_1_SDXL_checkpoint` : SDXL checkpoint tensors
 - `4_2_SDXL_LoRA` : SDXL LoRA tensors
 - `4_3_SDXL_ControlNet` : SDXL ControlNet tensors
 - `4_4_SDXL_Embedding` : SDXL embedding tensors
 - `4_8_SDXL_generated` : Generated PNGs from SDXL checkpoints (with metadata) are written here
 - `4_9_SDXL_upscaled` : Upscaled SDXL PNGs (with metadata) are written here
 
-Tensors are auto-sorted by `tensors.py` into the SD15 (`3_x`) or SDXL (`4_x`) lane
-based on the model architecture detected from each file.
+The `real` branch is SDXL-only: tensors detected as SD15 are routed to `2_1_errortensors`
+by `dist_tensors.py`. The `main` branch keeps the SD15 + SDXL two-lane layout for anime work.
 
 ## Quickstart
 
@@ -118,15 +113,10 @@ A single image from `generate.py` roughly follows the flow below (terms are deta
 ```mermaid
 flowchart TD
   P["Get prompt<br/>--prompt auto / sentence / png / original"]
-  P --> CK["Checkpoint draw<br/>pool = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: pick lane 25/75 (SD15/SDXL) first,<br/>then weighted within lane<br/>weight = checkpoint.toml (slow/fast/like)"]
-  CK --> V{"Version of the drawn checkpoint<br/>(its directory)"}
+  P --> CK["Checkpoint draw (4_1_SDXL_checkpoint)<br/>weighted by checkpoint.toml (slow/fast/like)"]
+  CK --> S2["SDXL single pass<br/>VAE override: sdxl-vae-fp16-fix"]
 
-  V -->|"SD15"| S1["SD15 single pass<br/>VAE override: sd-vae-ft-mse"]
-  V -->|"SDXL"| S2["SDXL single pass<br/>VAE override: sdxl-vae-fp16-fix"]
-
-  S1 --> FAM
-  S2 --> FAM
-  FAM{"family?<br/>checkpoint.toml / filename"}
+  S2 --> FAM{"family?<br/>checkpoint.toml / filename"}
   FAM -->|Pony| FP["auto-prepend score_9…<br/>allow Pony neg embeds (cap 3)"]
   FAM -->|non-Pony| FN["no score prefix<br/>drop Pony LoRAs/neg embeds"]
 
@@ -134,14 +124,14 @@ flowchart TD
   FN --> HG
   HG -->|high| AD["ADetailer<br/>person→face→hand (yolov8s)<br/>→ Real-ESRGAN x4 upscale"]
   HG -->|low| OUT
-  AD --> OUT["Output (per lane):<br/>SD15 → 3_8_SD15_generated / 3_9_SD15_upscaled<br/>SDXL → 4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>meta: Pipeline tag"]
+  AD --> OUT["Output:<br/>4_8_SDXL_generated / 4_9_SDXL_upscaled<br/>meta: Pipeline tag"]
 ```
 
 In words, the key points are:
 
-- **Checkpoints are drawn lane-aware**: in `--version auto` the lane (SD15 / SDXL) is picked first at **25/75** probability, then a checkpoint is drawn weighted within that lane by `checkpoint.toml` fast/slow/like. With `--version sdxl` or `--version sd15` the lane is forced.
-- **Both SD15 and SDXL render in a single pass** (the old SD15 draft → SDXL clean two-stage chain was retired on 2026-06-13). Output PNGs and upscaled PNGs are written to lane-specific directories.
-- **Each lane uses a stable external VAE** auto-downloaded on first run (SDXL → `madebyollin/sdxl-vae-fp16-fix`, SD15 → `stabilityai/sd-vae-ft-mse-original`) — bundled checkpoint VAEs are bypassed to avoid color shift / fp16 overflow artifacts.
+- **Checkpoints are drawn from `4_1_SDXL_checkpoint`** weighted by `checkpoint.toml` (fast/slow/like). The `real` branch is SDXL-only; SD15 tensors are routed to `2_1_errortensors` at intake.
+- **SDXL renders in a single pass.**
+- **A stable external VAE** (`madebyollin/sdxl-vae-fp16-fix`) is auto-downloaded on first run — bundled checkpoint VAEs are bypassed to avoid round-trip color shift / sepia artifacts.
 - **`family` gating is applied uniformly** (CLI and GUI share the same `prepare_workflow_prompt` helper): Pony checkpoints get the score prefix + capped Pony neg embeds; non-Pony bases drop Pony LoRAs and Pony neg embeds.
 - **`--gear high`** runs ADetailer (`face_yolov8s` / `hand_yolov8s` / `person_yolov8s-seg`) and Real-ESRGAN x4 upscaling.
 
@@ -261,8 +251,8 @@ The input source determines the mode automatically (you do not need to pass `--p
 
 - No flag (`--prompt auto`, default) : Build prompt text and LoRA keywords from `prompt.toml` and generate continuously. No reference image.
 - `--sentence "<text>" [--lora-keywords "kw,..."]` : Generate continuously from the supplied text + LoRA keywords (see below). No reference image.
-- `--png <PNG file>` : **Quality-up refine.** Repaint the *image* of that PNG with SDXL img2img, lifting it from SD15-grade toward SDXL-grade quality (**stops after one image**, see below).
-- `--png-sentence <PNG file>` : Generate continuously from the *prompt text* embedded in the PNG (the image itself is not used). The unified draw routes SD15 → two-stage or SDXL → single pass.
+- `--png <PNG file>` : **Quality-up refine.** Repaint the *image* of that PNG with SDXL img2img to lift quality (**stops after one image**, see below).
+- `--png-sentence <PNG file>` : Generate continuously from the *prompt text* embedded in the PNG (the image itself is not used).
 - `--prompt original --png-sentence <PNG file>` : Reuse the checkpoint, LoRAs, and prompt text from the PNG metadata.
 
 **Note (behavior change):** the old `--png` meant "read text from a PNG and generate anew", but the roles have changed to
@@ -270,9 +260,9 @@ The input source determines the mode automatically (you do not need to pass `--p
 
 ##### Quality-up refine (`--png`)
 
-A one-shot mode that lifts older SD15 images (and the like) toward SDXL-grade quality.
+A one-shot mode that repaints older / lower-grade images toward SDXL-grade quality.
 
-- The given PNG's image is used as the init for **SDXL img2img** repainting. The checkpoint is drawn from the SDXL-only pool (or `--checkpoint`), with family handling (Pony → score prefix / Pony neg).
+- The given PNG's image is used as the init for **SDXL img2img** repainting. The checkpoint is drawn from `4_1_SDXL_checkpoint` (or `--checkpoint`), with family handling (Pony → score prefix / Pony neg).
 - LoRAs are drawn from the SDXL LoRAs using the PNG's LoRA keywords (or `--lora-keywords`).
 - `--refine-denoise <0.0–1.0>` : img2img denoise (default 0.5; low = faithful to the original / high = SDXL repaints more aggressively).
 - The resolution is scaled to roughly 1MP (SDXL-native) while preserving the original PNG's aspect ratio. `--gear high` adds ADetailer + upscaling; `--gear low` does refine only.
@@ -282,11 +272,7 @@ A one-shot mode that lifts older SD15 images (and the like) toward SDXL-grade qu
 
 `--checkpoint <checkpoint name>` : Pin a specific checkpoint.
 
-The draw pool is determined by `--version` (see below). By default (`auto`) the draw is from a single pool that
-merges SD15 + SDXL, and the drawn version automatically decides single-stage vs. two-stage.
-
-Within the pool,
-the first run picks a checkpoint **not** in `checkpoint.toml` at random,
+The draw pool is `4_1_SDXL_checkpoint`. The first run picks a checkpoint **not** in `checkpoint.toml` at random,
 and subsequent runs pick from the listed checkpoints (see below) with probability 2/3 and from the unlisted ones with 1/3.
 
 For listed checkpoints, the weight is
@@ -299,11 +285,11 @@ For listed checkpoints, the weight is
 - `fast` : Minimum observed generation time per image (s)
 - `like` : User preference, positive or negative
 - `inference` : Extra inference steps to add, positive or negative
-- `style` : `"anime"`, `"real"`, `"mix"`, or `""` (used to pick the ControlNet / upscaling model)
+- `style` : `"real"` (real-branch default), `"anime"`, `"mix"`, or `""` (used to pick the ControlNet / upscaling model). New checkpoints registered by `dist_tensors.py` default to `style = "real"`.
 - `family` : Lineage `"pony"` / `"illustrious"` / `"real"` / `""` (used for Pony handling; see "Lineage-aware handling" below)
 
 When `--gear high` finishes generating an image, if the checkpoint is not yet listed,
-an entry is added with `slow` = `fast` = measured time (s), `like = 0`, `inference = 0`, `style = ""`,
+an entry is added with `slow` = `fast` = measured time (s), `like = 0`, `inference = 0`, `style = "real"`,
 and `family =` a guess from the filename (pony/pdxl/pny → pony, etc.; `""` when undecidable).
 `family` can be wrong, so fix it by eye (Illustrious-family models in particular are hard to tell from the filename).
 
@@ -314,7 +300,6 @@ Based on the drawn checkpoint's `family` (or its filename when absent), the SDXL
 
 - **Pony** → prepends `score_9, score_8_up, …` to the front of the positive prompt, and allows Pony neg embeddings (**up to 3**, to curb over-negation).
 - **non-Pony** → **automatically excludes** Pony-only neg embeddings (names containing `pony` / `pdxl` / `pny`), because applying them to non-Pony models breaks colors and suppresses the subject. General-purpose neg embeddings are used regardless of lineage.
-- No Pony-related additions are made to the SD15 draft stage.
 
 ##### LoRA keywords and selection
 
@@ -335,11 +320,9 @@ LoRA keywords are also appended to the prompt text with weight `(0.8 / number_of
 #### Gear
 
 `--gear low` : Rough generation. Single pass, 30 inference steps, no ADetailer, no LoRA, no ControlNet, no upscaling.
-`--gear high` : Production generation. 50 inference steps, ADetailer on, LoRA selection, ControlNet selection, upscaling on. Single pass for both SD15 and SDXL.
+`--gear high` : Production generation. 50 inference steps, ADetailer on, LoRA selection, ControlNet selection, upscaling on.
 
 `--gear high` is the default.
-
-You do not need to think about SD15 vs. SDXL; just choose "rough (low)" or "finish (high)". Both versions render in a single pass (the old SD15 draft → SDXL clean two-stage chain was retired on 2026-06-13).
 
 #### Architecture
 
@@ -348,23 +331,12 @@ You do not need to think about SD15 vs. SDXL; just choose "rough (low)" or "fini
 
 `--arch cuda` is the default.
 
-#### Version (checkpoint draw pool)
+#### Resolution
 
-`--version` narrows the checkpoint draw pool; both SD15 and SDXL render in a single pass.
-
-`--version auto` : Treat SD15 (`3_1`) + SDXL (`4_1`) as a merged pool. **The lane is drawn first at 25/75 (SD15/SDXL)** and the checkpoint is then drawn weighted within that lane by `checkpoint.toml` (default).
-`--version sdxl` : Draw only from `4_1` SDXL.
-`--version sd15` : Draw only from `3_1` SD15.
-
-`--version auto` is the default.
-
-The within-lane weight reads `checkpoint.toml` separately for SD15 and SDXL, so the fast/slow scale difference between lanes no longer biases the draw (this was a known bug in the cross-lane `max_slow` weighting before 2026-06-13). The 25/75 SDXL-heavy split exists because the VAE override + single-pass unification made SDXL the everyday choice. Change `SD15_LANE_PROB` in `pick_checkpoint` to adjust.
-
-Resolution defaults follow the version (SD15 = 512 / SDXL = 1024; landscape `many` is SD15 = 768×512 / SDXL = 1216×832).
+Defaults are SDXL native: 1024×1024 (landscape `many` is 1216×832).
 Override with `--width` / `--height` / `--many-width` / `--many-height`.
 
-The route taken is visible in the `path:` line of the run log and the `Pipeline:` field of the output PNG metadata
-(e.g. `Pipeline: SDXL single-pass` / `Pipeline: SD15 single-pass`).
+The `Pipeline:` field of the output PNG metadata records `SDXL single-pass` (or `refine (...)` for `--png`).
 
 #### LoRA
 
@@ -402,7 +374,7 @@ python generate.py --dump-only --version sdxl
 # Adding --gear low drops ADetailer/upscale, giving the minimal graph (txt2img + LoRA) that is easiest to read
 ```
 
-Kinds are `sdxl_single` / `sd15_single` / `refine`. `workflow_dump/` is gitignored.
+Kinds are `sdxl_single` / `refine`. `workflow_dump/` is gitignored.
 
 ### Tensor Info Viewer: tensors_view.py
 
@@ -416,7 +388,7 @@ A Tkinter viewer that reads `safetensors` headers raw and lists metadata, tensor
 - The directory combo on the toolbar switches between the candidates from `[tensors_dirs].list` and reloads immediately.
 - Search / kind / base filters and sorting are available. The "+meta" toggle extends search to metadata text.
 - If a sidecar preview (`<name>.preview.png`, produced by `make_previews.py`) exists, it is shown in the top-right pane. Click the preview to open a full-size view (click or Esc to close).
-- Selecting a LoRA row opens the "Preview settings" editor on the right: edit the category (`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown`, ...) and an optional custom prompt. Multi-selection batch-sets the category. SD15 vs. SDXL routing is detected per row automatically.
+- Selecting a LoRA row opens the "Preview settings" editor on the right: edit the category (`ware` / `doing1-3` / `doingmob` / `object` / `part` / `view` / `place` / `artstyle` / `unknown`, ...) and an optional custom prompt. Multi-selection batch-sets the category.
 - "Regenerate" launches `make_previews.py --files` in a subprocess to re-render sidecars only for the selected tensors.
 - "Gen thumbs" batch-renders sidecars for every tensor that does not yet have one.
 - Pass `--list` to skip the GUI and print the listing to the terminal instead.
@@ -431,10 +403,10 @@ Shared between the viewer and `make_previews.py`.
 
 #### Sidecar metadata: LoRA_preview.toml
 
-Per-LoRA category and custom-prompt overrides, split between SD15 and SDXL (so that stems that collide between the two versions stay disambiguated):
+Per-LoRA category and custom-prompt overrides:
 
-- `[SD15_categories]` / `[SDXL_categories]` : `stem = "<category>"`
-- `[SD15_prompts]` / `[SDXL_prompts]` : `stem = "<custom positive>"` (LoRAs without an entry are rendered with the category scaffold alone)
+- `[SDXL_categories]` : `stem = "<category>"`
+- `[SDXL_prompts]` : `stem = "<custom positive>"` (LoRAs without an entry are rendered with the category scaffold alone)
 
 The audit performed at `tensors.py` startup auto-appends new LoRAs as `ware` and warns about stale entries whose source file no longer exists (manual category edits are preserved — nothing is deleted automatically). Run `python make_previews.py --init-categories` to fully reconcile the file.
 
@@ -448,11 +420,11 @@ A Tkinter-based manual image generation GUI that reuses `generate.py`'s internal
 
 #### Main window
 
-- **Checkpoint**: combobox showing 3_1_SD15_checkpoint and 4_1_SDXL_checkpoint tagged `[SD15] / [SDXL]`. The thumbnail (`<name>.preview.png` sidecar produced by `make_previews.py`) is shown alongside; click for full-size modal
+- **Checkpoint**: combobox showing 4_1_SDXL_checkpoint entries. The thumbnail (`<name>.preview.png` sidecar produced by `make_previews.py`) is shown alongside; click for full-size modal
 - **LoRA**: filtered automatically by the checkpoint's version (3_2 or 4_2). Standard Ctrl/Shift-click multi-select (EXTENDED mode). Selected items are echoed as a thumbnail strip below (each thumbnail click opens the full-size modal)
 - **ControlNet / Embedding**: two side-by-side lists. ControlNet is SDXL-only (4_3, single-select). Embedding switches per version (3_3 or 4_4, multi-select). Selected embeddings are auto-prepended to the negative prompt as `embedding:<stem>` (ComfyUI native syntax)
 - **Prompt**: multi-line text area (supports compel emphasis `*word*` / `**word**` / `***word***`)
-- **Count / OpenPose / Settings… button / Generate / Stop**: single control row. "Count" 1-300 = number of images (each iteration gets a fresh random seed). OpenPose is auto-disabled when SD15 is picked (ControlNet 4_3 is SDXL-only)
+- **Count / OpenPose / Settings… button / Generate / Stop**: single control row. "Count" 1-300 = number of images (each iteration gets a fresh random seed)
 - **Gallery** (bottom): thumbnails are appended as each image completes. **Click** opens a full-size modal; **right-click** brings up "Delete" / "Upscale (Anime / Real)"
 - **Mouse wheel**: scrolls the gallery vertically
 
@@ -483,8 +455,8 @@ python gallery.py [--list]
 
 A Tkinter thumbnail gallery for generated PNGs. **Read-only** — no copy / no delete (guards against accidental writes).
 
-- Recursively scans four fixed directories: `3_8_SD15_generated` / `3_9_SD15_upscaled` / `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
-- Reads A1111-compatible metadata (parameters chunk) and shows thumbnails + metadata. SD15 / SDXL is color-coded based on the `Pipeline` field (falling back to `Size`)
+- Recursively scans two fixed directories: `4_8_SDXL_generated` / `4_9_SDXL_upscaled`
+- Reads A1111-compatible metadata (parameters chunk) and shows thumbnails + metadata
 - Toggle between Icon view and List view (click column headers to sort; row thumbnail size is adjustable 24–128 px via slider)
 - Search (AND substring across name/model/loras/keywords/positive/pipeline) plus arch filter
 - Right pane: large preview + full params + positive/negative + "Open" (launches the OS image viewer)

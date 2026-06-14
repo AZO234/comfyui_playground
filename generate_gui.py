@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""generate_gui.py - 画像生成 GUI (Tkinter, ComfyUI HTTP API 経由)。
+"""generate_gui.py - 画像生成 GUI (Tkinter, ComfyUI HTTP API 経由)。real ブランチは SDXL only。
 
 generate.py の CLI ループに対する、手動指定・即時可視化版。
 - チェックポイント / LoRA / プロンプトを手で選び、1〜300 枚をまとめて生成。
 - *word* / **word** / ***word*** の重み記法は normalize_emphasis でそのまま使える。
-- 生成画像は版で分かれた dir (SDXL=4_8_SDXL_generated / SD15=3_8_SD15_generated) に
-  PNG + A1111 メタ付きで保存し、画面下段の
+- 生成画像は 4_8_SDXL_generated に PNG + A1111 メタ付きで保存し、画面下段の
   サムネイル列に追記。サムネクリックでモーダルフルサイズ表示。
 
 generate.py の build_workflow_txt2img / _submit_and_fetch / save_with_a1111_metadata
@@ -54,11 +53,6 @@ except ImportError:
     DND_FILES = None
     _DND_AVAILABLE = False
 from generate import (
-    SD15_CHECKPOINT_DIR,
-    SD15_EMBED_DIR,
-    SD15_GENERATED_DIR,
-    SD15_LORA_DIR,
-    SD15_UPSCALED_DIR,
     SDXL_CHECKPOINT_DIR,
     SDXL_CONTROLNET_DIR,
     SDXL_EMBED_DIR,
@@ -70,7 +64,6 @@ from generate import (
     collect_negative_embeddings,
     ensure_adetailer_model,
     ensure_comfyui_arch,
-    ensure_sd15_vae_mse,
     ensure_sdxl_vae_fix,
     ensure_upscale_model,
     infer_controlnet_mode,
@@ -83,10 +76,10 @@ from generate import (
 )
 
 UPSCALE_MODELS = {
-    "anime": "RealESRGAN_x4plus_anime_6B.pth",  # 既定: アニメ/イラスト系
-    "real":  "RealESRGAN_x4plus.pth",            # 実写系
+    "real":  "RealESRGAN_x4plus.pth",            # 実写系 (real ブランチ既定)
+    "anime": "RealESRGAN_x4plus_anime_6B.pth",  # アニメ/イラスト系 (後方互換)
 }
-DEFAULT_UPSCALE_STYLE = "anime"
+DEFAULT_UPSCALE_STYLE = "real"
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -99,13 +92,9 @@ CHECKPOINT_THUMB_SIZE = (160, 160)
 GALLERY_THUMB_SIZE = (160, 160)
 GUI_SETTINGS_TOML = Path(__file__).parent / "generate_gui.toml"
 
-VERSION_BY_DIR = {
-    SD15_CHECKPOINT_DIR: "sd15",
-    SDXL_CHECKPOINT_DIR: "sdxl",
-}
-DEFAULT_RES = {"sd15": 768, "sdxl": 1024}
-# 「2 人以上 (ワイド)」ON 時の横長キャンバス (W, H)。SDXL は generate.py の many 既定と揃える
-WIDE_RES = {"sd15": (912, 624), "sdxl": (1216, 832)}
+DEFAULT_RES_SDXL = 1024
+# 「2 人以上 (ワイド)」ON 時の横長キャンバス (W, H)。generate.py の many 既定と揃える
+WIDE_RES_SDXL = (1216, 832)
 
 
 def _preview_path(safetensors_path: Path) -> Optional[Path]:
@@ -147,7 +136,6 @@ class GenerateGUI:
         self._modal_win: Optional[tk.Toplevel] = None
 
         self.checkpoints: list[Path] = []
-        self.loras_sd15: list[Path] = []
         self.loras_sdxl: list[Path] = []
         self.controlnets: list[Path] = []
         self.current_loras: list[Path] = []
@@ -204,23 +192,9 @@ class GenerateGUI:
         )
         self.checkpoint_random_check.grid(row=0, column=1, sticky="w", padx=(0, 8))
 
-        # 版フィルタ (SDXL / SD15 / 混合 のラジオ)。combobox の表示を絞り込み、ランダム時もこの版から抽選
-        # 混合 = 両 dir を統合してリストする (ランダム時は両版から平等抽選、ckpt_random=true 用)
         arch_frame = ttk.Frame(ckpt_frame)
         arch_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        self.arch_filter_var = tk.StringVar(value="sdxl")
-        ttk.Radiobutton(
-            arch_frame, text="SDXL", value="sdxl", variable=self.arch_filter_var,
-            command=self._on_arch_filter_change,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(
-            arch_frame, text="SD15", value="sd15", variable=self.arch_filter_var,
-            command=self._on_arch_filter_change,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Radiobutton(
-            arch_frame, text="混合", value="mix", variable=self.arch_filter_var,
-            command=self._on_arch_filter_change,
-        ).pack(side=tk.LEFT)
+        ttk.Label(arch_frame, text="(SDXL only)", foreground="#888").pack(side=tk.LEFT)
 
         # thumb は Frame で固定サイズ枠を作り、その中の Label に画像を入れる
         thumb_box = tk.Frame(
@@ -283,7 +257,7 @@ class GenerateGUI:
         )
         self.lora_icon_canvas.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
 
-        # ControlNet (SDXL のみ) — Embedding は CLI と同じ自動投入経路 (helper) に集約済み
+        # ControlNet — Embedding は CLI と同じ自動投入経路 (helper) に集約済み
         row += 1
         ttk.Label(top, text="ControlNet:").grid(
             row=row, column=0, sticky="ne", padx=4, pady=4)
@@ -291,7 +265,7 @@ class GenerateGUI:
         cn_emb_frame.grid(row=row, column=1, sticky="ew", padx=4, pady=4)
         cn_emb_frame.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(cn_emb_frame, text="ControlNet (SDXL のみ、単一選択):",
+        ttk.Label(cn_emb_frame, text="ControlNet (単一選択):",
                   foreground="#666").grid(row=0, column=0, sticky="w")
 
         cn_box = ttk.Frame(cn_emb_frame)
@@ -407,8 +381,8 @@ class GenerateGUI:
         ttk.Label(ctrl, text="推論数:").pack(side=tk.LEFT, padx=(8, 2))
         ttk.Spinbox(ctrl, from_=1, to=200, textvariable=self.steps_var, width=5).pack(side=tk.LEFT)
 
-        # 2 人以上 (ワイド): ON で横長キャンバス (SDXL=1216x832 / SD15=912x624) に切替え、
-        # 複数人物の融合を抑える。OFF は設定ダイアログの幅/高さをそのまま使う
+        # 2 人以上 (ワイド): ON で横長キャンバス (1216x832) に切替え、複数人物の融合を抑える。
+        # OFF は設定ダイアログの幅/高さをそのまま使う
         self.many_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             ctrl, text="2人以上 (ワイド)", variable=self.many_var,
@@ -436,8 +410,8 @@ class GenerateGUI:
 
         # 詳細パラメータも「設定」ダイアログに移動 (Var だけ生成しておく)
         # steps_var は上の ctrl row で先行宣言済 (推論数 Spinbox と共有)
-        self.width_var = tk.IntVar(value=DEFAULT_RES["sd15"])
-        self.height_var = tk.IntVar(value=DEFAULT_RES["sd15"])
+        self.width_var = tk.IntVar(value=DEFAULT_RES_SDXL)
+        self.height_var = tk.IntVar(value=DEFAULT_RES_SDXL)
         self.seed_var = tk.StringVar(value="-1")
         self.sampler_var = tk.StringVar(value="dpmpp_2m")
         self.scheduler_var = tk.StringVar(value="karras")
@@ -484,28 +458,15 @@ class GenerateGUI:
 
     # ---------- アセット読み込み ---------- #
     def _scan_assets(self) -> None:
-        self.checkpoints = (
-            _list_safetensors(SD15_CHECKPOINT_DIR)
-            + _list_safetensors(SDXL_CHECKPOINT_DIR)
-        )
-        self.loras_sd15 = _list_safetensors(SD15_LORA_DIR)
+        self.checkpoints = _list_safetensors(SDXL_CHECKPOINT_DIR)
         self.loras_sdxl = _list_safetensors(SDXL_LORA_DIR)
         self.controlnets = _list_safetensors(SDXL_CONTROLNET_DIR)
 
     def _filtered_checkpoints(self) -> list[Path]:
-        """版フィルタ (`self.arch_filter_var`) を適用した checkpoint リスト。
-        mix の場合は両 dir をそのまま返す (combobox の [SD15]/[SDXL] tag で区別可能)。"""
-        arch = getattr(self, "arch_filter_var", None)
-        version = arch.get() if arch else "sdxl"
-        if version == "mix":
-            return list(self.checkpoints)
-        target_dir = SDXL_CHECKPOINT_DIR if version == "sdxl" else SD15_CHECKPOINT_DIR
-        return [p for p in self.checkpoints if p.parent == target_dir]
+        return list(self.checkpoints)
 
     def _populate_cn_listbox(self) -> None:
-        """ControlNet listbox を self.controlnets (= _scan_assets で埋めた SDXL_CONTROLNET_DIR の中身)
-        で 1 回だけ埋める。checkpoint 切替では呼ばない (CN は SDXL のときだけ意味があり、
-        SD15 切替時は _on_checkpoint_change で選択クリアするのみ)。"""
+        """ControlNet listbox を self.controlnets で 1 回だけ埋める。"""
         if not hasattr(self, "cn_listbox"):
             return
         self.cn_listbox.delete(0, tk.END)
@@ -515,10 +476,7 @@ class GenerateGUI:
     def _populate_checkpoint_combo(self) -> None:
         ckpts = self._filtered_checkpoints()
         self._visible_checkpoints = ckpts  # current index → Path 解決用
-        labels = []
-        for p in ckpts:
-            tag = "[SD15]" if p.parent == SD15_CHECKPOINT_DIR else "[SDXL]"
-            labels.append(f"{tag} {p.stem}")
+        labels = [p.stem for p in ckpts]
         self.checkpoint_combo["values"] = labels
         if labels:
             self.checkpoint_combo.current(0)
@@ -532,12 +490,6 @@ class GenerateGUI:
         if idx < 0 or idx >= len(visible):
             return None
         return visible[idx]
-
-    def _current_version(self) -> str:
-        ckpt = self._current_checkpoint()
-        if ckpt is None:
-            return "sd15"
-        return VERSION_BY_DIR.get(ckpt.parent, "sd15")
 
     # ---------- イベント ---------- #
     def _on_prompt_mode_change(self) -> None:
@@ -554,11 +506,6 @@ class GenerateGUI:
             self.checkpoint_combo.configure(state="disabled")
         else:
             self.checkpoint_combo.configure(state="readonly")
-
-    def _on_arch_filter_change(self) -> None:
-        """SD15/SDXL ラジオ切替: combobox を版で絞り直し、先頭を選び直す。
-        ランダム時はこの版の checkpoint 群からのみ random.choice される。"""
-        self._populate_checkpoint_combo()
 
     def _on_checkpoint_change(self, event=None) -> None:
         ckpt = self._current_checkpoint()
@@ -578,26 +525,13 @@ class GenerateGUI:
         else:
             self.checkpoint_thumb_label.configure(image="", text="(no thumb)")
 
-        version = self._current_version()
-        self.current_loras = self.loras_sd15 if version == "sd15" else self.loras_sdxl
+        self.current_loras = self.loras_sdxl
         self.lora_listbox.delete(0, tk.END)
         for p in self.current_loras:
             self.lora_listbox.insert(tk.END, p.stem)
         self.selected_lora_indices.clear()
         self._refresh_lora_icons()
-        # 版切替 → LoRA リストが入れ替わったので候補ハイライトを再計算
         self._refresh_lora_candidate_highlight()
-
-        # Embedding は worker 側で helper が CLI と同じ自動投入 (UI 不要)
-        # SD15 を選んだら ControlNet は使えないので選択解除
-        if version == "sd15" and hasattr(self, "cn_listbox"):
-            self.cn_listbox.selection_clear(0, tk.END)
-            self.selected_controlnet_index = -1
-
-        # 解像度を版に合わせて自動セット (ユーザが弄った後は次の checkpoint 切替で上書きされる点に注意)
-        if hasattr(self, "width_var"):
-            self.width_var.set(DEFAULT_RES[version])
-            self.height_var.set(DEFAULT_RES[version])
 
     def _on_lora_select(self, event=None) -> None:
         self.selected_lora_indices = set(self.lora_listbox.curselection())
@@ -761,11 +695,9 @@ class GenerateGUI:
             messagebox.showerror("エラー", "チェックポイントが選択されていません")
             return
         if ckpt_random and not random_pool:
-            arch_label = self.arch_filter_var.get().upper() if self.arch_filter_var.get() != "mix" else "混合 (SD15+SDXL)"
             messagebox.showerror(
                 "エラー",
-                f"選択中の版 ({arch_label}) に "
-                "チェックポイントが 1 つも見つかりません",
+                "チェックポイントが 1 つも見つかりません (4_1_SDXL_checkpoint/)",
             )
             return
         prompt_mode = self.prompt_mode_var.get()  # "free" / "toml"
@@ -784,7 +716,6 @@ class GenerateGUI:
             positive = normalize_emphasis(positive)
         negative = normalize_emphasis(negative)
 
-        version = self._current_version()
         loras = [self.current_loras[i] for i in sorted(self.selected_lora_indices)]
         lora_total = float(self.lora_total_var.get())
         scale = lora_total / max(1, len(loras))
@@ -792,14 +723,13 @@ class GenerateGUI:
         loras_with_strength = [(p, scale) for p in loras]
         # negative embedding は worker 側で helper が CLI と同じ neg-gate + append を行う
 
-        # 選択された ControlNet (SDXL のみ)。リファレンス画像が D&D されている場合のみ実配線される
+        # 選択された ControlNet。リファレンス画像が D&D されている場合のみ実配線される
         # 手動選択優先 / 無ければ ref_mode に対応する ControlNet を auto pick
         cn_path: Optional[Path] = None
-        if version == "sdxl":
-            if 0 <= self.selected_controlnet_index < len(self.controlnets):
-                cn_path = self.controlnets[self.selected_controlnet_index]
-            elif self.reference_image_path is not None:
-                cn_path = self._auto_pick_controlnet(self.ref_mode_var.get())
+        if 0 <= self.selected_controlnet_index < len(self.controlnets):
+            cn_path = self.controlnets[self.selected_controlnet_index]
+        elif self.reference_image_path is not None:
+            cn_path = self._auto_pick_controlnet(self.ref_mode_var.get())
 
         ref_mode = str(self.ref_mode_var.get() or "openpose")
         ref_strength = float(self.ref_strength_var.get() or 0.7)
@@ -818,7 +748,6 @@ class GenerateGUI:
             "checkpoint": ckpt,
             "checkpoint_random": ckpt_random,
             "checkpoint_random_pool": random_pool,
-            "version": version,
             "prompt_mode": prompt_mode,
             "positive": positive,
             "positive_extra": positive_extra,  # toml モードで追加前置するときに使う
@@ -878,7 +807,6 @@ class GenerateGUI:
             "prompt_mode":       str(self.prompt_mode_var.get()),
             "count":             int(self.count_var.get()),
             "checkpoint_random": bool(self.checkpoint_random_var.get()),
-            "arch_filter":       str(self.arch_filter_var.get()),
             "lora_keywords":     self.lora_kw_var.get() or "",
             "many":              bool(self.many_var.get()),
             "positive":          self.positive_value,
@@ -950,10 +878,6 @@ class GenerateGUI:
         if "prompt_mode" in data and str(data["prompt_mode"]) in ("free", "toml"):
             self.prompt_mode_var.set(str(data["prompt_mode"]))
             self._on_prompt_mode_change()
-        # 版フィルタを先に復元 → combobox を絞った状態で他の Var を入れる
-        if "arch_filter" in data and str(data["arch_filter"]) in ("sd15", "sdxl", "mix"):
-            self.arch_filter_var.set(str(data["arch_filter"]))
-            self._populate_checkpoint_combo()
         _try(self.checkpoint_random_var.set, "checkpoint_random", bool)
         _try(self.many_var.set,              "many",              bool)
         # ランダムチェック復元後に combobox の disabled 状態を反映
@@ -1139,17 +1063,11 @@ class GenerateGUI:
             except Exception as e:
                 self._result_queue.put({"status": f"ADetailer モデル準備失敗 ({e}) → スキップ"})
 
-        # 各版の安定 VAE を worker 起動時 1 回 DL + 解決
-        # SDXL: madebyollin/sdxl-vae-fp16-fix (茶色フィルム対策)
-        # SD15: stabilityai/sd-vae-ft-mse-original (グレースケール脱色 + マゼンタスペック対策)
+        # SDXL 安定 VAE (madebyollin/sdxl-vae-fp16-fix、茶色フィルム対策) を 1 回 DL + 解決
         try:
             sdxl_vae_name = ensure_sdxl_vae_fix()
         except Exception:
             sdxl_vae_name = None
-        try:
-            sd15_vae_name = ensure_sd15_vae_mse()
-        except Exception:
-            sd15_vae_name = None
 
         base_w = int(params["width"])
         base_h = int(params["height"])
@@ -1194,12 +1112,9 @@ class GenerateGUI:
         except Exception:
             sdxl_lora_subjects = {}
         try:
-            neg_embed_by_ver = {
-                "sd15": collect_negative_embeddings(SD15_EMBED_DIR),
-                "sdxl": collect_negative_embeddings(SDXL_EMBED_DIR),
-            }
+            sdxl_neg_embeds = collect_negative_embeddings(SDXL_EMBED_DIR)
         except Exception:
-            neg_embed_by_ver = {"sd15": [], "sdxl": []}
+            sdxl_neg_embeds = []
 
         # リファレンス画像 (ControlNet) を 1 回だけアップロード。失敗時は ControlNet を OFF
         cn_name: Optional[str] = params.get("controlnet")
@@ -1247,31 +1162,14 @@ class GenerateGUI:
                 iter_kws = lora_keywords
                 iter_many = bool(params.get("many"))
 
-            # チェックポイントが「ランダム」なら毎枚抽選し、version / pool を再決定
+            # チェックポイントが「ランダム」なら毎枚抽選
             if ckpt_random:
-                # SD15/SDXL/混合 ラジオで絞った候補のみから抽選
-                # 混合のときは generate.pick_checkpoint と同じく 25/75 (SD15/SDXL) で先に版を決める
                 random_pool = params.get("checkpoint_random_pool") or self.checkpoints
-                sd15_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sd15"]
-                sdxl_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sdxl"]
-                if sd15_sub and sdxl_sub:
-                    lane_pool = sd15_sub if random.random() < 0.25 else sdxl_sub
-                else:
-                    lane_pool = random_pool
-                this_ckpt = random.choice(lane_pool)
-                this_version = VERSION_BY_DIR.get(this_ckpt.parent, "sd15")
-                this_pool = (
-                    self.loras_sd15 if this_version == "sd15" else self.loras_sdxl
-                )
-                # ラジオで版固定なので手動 LoRA も版マッチしている前提でそのまま使う
-                this_manual = manual_loras
+                this_ckpt = random.choice(random_pool)
             else:
                 this_ckpt = params["checkpoint"]
-                this_version = params["version"]
-                this_pool = (
-                    self.loras_sd15 if this_version == "sd15" else self.loras_sdxl
-                )
-                this_manual = manual_loras
+            this_pool = self.loras_sdxl
+            this_manual = manual_loras
 
             # LoRA 決定:
             #   ① 手動選択あり → そのまま
@@ -1289,11 +1187,10 @@ class GenerateGUI:
             else:
                 this_loras = []
 
-            # 2 人以上 (ワイド) ON → 版に応じた横長プリセットで base 解像度を上書き
-            # (人物融合を抑える。OFF は設定ダイアログの width/height をそのまま使う)
+            # 2 人以上 (ワイド) ON → 横長プリセットで base 解像度を上書き (人物融合抑制)
             # toml モードでは build_prompt の many フラグも OR で考慮する
             if iter_many:
-                this_w, this_h = WIDE_RES.get(this_version, (base_w, base_h))
+                this_w, this_h = WIDE_RES_SDXL
             else:
                 this_w, this_h = base_w, base_h
 
@@ -1304,8 +1201,7 @@ class GenerateGUI:
                 "status": f"生成中 {progress} (seed={seed}, ckpt={ckpt_label})",
             })
 
-            # SDXL のみ ControlNet 配線 (SD15 ckpt が混ざる場合は cn 引数を捨てる)
-            this_cn_name = cn_name if this_version == "sdxl" else None
+            this_cn_name = cn_name
             this_cn_image = ref_uploaded_name if this_cn_name else None
             effective_cn_mode = cn_mode if this_cn_name else ""
 
@@ -1316,7 +1212,7 @@ class GenerateGUI:
                 picked_loras=this_loras,
                 checkpoint_path=this_ckpt,
                 checkpoint_data=checkpoint_data,
-                neg_embed_stems=neg_embed_by_ver.get(this_version, []),
+                neg_embed_stems=sdxl_neg_embeds,
                 explicit_quality_prefix="",
                 force_pony_prefix=False,
                 controlnet_mode=effective_cn_mode,
@@ -1351,8 +1247,7 @@ class GenerateGUI:
                 controlnet_mode=cn_mode,
                 controlnet_image=this_cn_image,
                 controlnet_strength=cn_strength,
-                # SDXL のときだけ安定 VAE を被せる (SD15 ckpt には流用不可)
-                vae_override=sdxl_vae_name if this_version == "sdxl" else sd15_vae_name,
+                vae_override=sdxl_vae_name,
             )
 
             try:
@@ -1367,8 +1262,7 @@ class GenerateGUI:
                 continue
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            # 出力 dir は ckpt の版で振り分け (SD15=3_8 / SDXL=5_1)
-            gen_dir = SDXL_GENERATED_DIR if this_version == "sdxl" else SD15_GENERATED_DIR
+            gen_dir = SDXL_GENERATED_DIR
             gen_dir.mkdir(exist_ok=True)
             out_path = gen_dir / f"gui_{ts}_{i+1:04d}.png"
             final_w = int(this_w * hires_scale) if params["hires_fix"] else this_w
@@ -1556,10 +1450,7 @@ class GenerateGUI:
     def _do_upscale_sync(
         self, path: Path, style: str, client_id: str,
     ) -> Optional[Path]:
-        """1 枚を Real-ESRGAN x4 アップスケールして保存先 dir は path の親 dir から判別:
-            3_8_SD15_generated → 3_9_SD15_upscaled
-            4_8_SDXL_generated → 4_9_SDXL_upscaled
-            それ以外 (旧 5_1_generated 等の手動入力含む) は SDXL_UPSCALED_DIR にフォールバック。
+        """1 枚を Real-ESRGAN x4 アップスケールして 4_9_SDXL_upscaled に保存。
         失敗時は raise (caller がメッセージ処理)。worker (gen ループ内同期) で利用。
         ソース PNG (path) に A1111 parameters chunk があれば upscale 後に複写
         (Size フィールドのみ新解像度に書き換え)。"""
@@ -1582,11 +1473,7 @@ class GenerateGUI:
         img_bytes, _info, _ = _submit_and_fetch(workflow, client_id)
         if img_bytes is None:
             return None
-        # 親 dir から版を判別 (SD15_GENERATED_DIR or 旧 3_9_SD15_rough → SD15、それ以外 → SDXL)
-        if path.parent == SD15_GENERATED_DIR:
-            up_dir = SD15_UPSCALED_DIR
-        else:
-            up_dir = SDXL_UPSCALED_DIR
+        up_dir = SDXL_UPSCALED_DIR
         up_dir.mkdir(exist_ok=True)
         out_path = up_dir / path.name
         out_path.write_bytes(img_bytes)

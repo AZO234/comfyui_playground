@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""generate.py - ComfyUI HTTP API 経由で SDXL 画像を連続生成する CLI。
+"""generate.py - ComfyUI HTTP API 経由で SDXL 画像を連続生成する CLI (real ブランチは SDXL only)。
 
 実行モデル:
     [Python (この generate.py)] ─── HTTP POST /prompt ──▶ [常駐 ComfyUI server]
@@ -7,19 +7,11 @@
                                   ◀── GET /view?filename ──
     各 source ループで:
         prompt.toml → build_prompt → checkpoint 抽選 → workflow JSON 組立 →
-        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 4_8_SDXL_generated / 3_8_SD15_generated に保存
+        ComfyUI に投入 → 完成画像を fetch → A1111 メタ付き PNG で 4_8_SDXL_generated に保存
 
 前提:
     `python ComfyUI/main.py --listen 127.0.0.1 --port 8188` で ComfyUI が常駐している
     (`--listen 0.0.0.0` でも可、外部 LAN 公開する場合)
-
-Phase 1 実装範囲:
-    - `--prompt auto` のみ (prompt.toml 駆動)
-    - 単純 SDXL txt2img (LoRA / ControlNet / ADetailer / upscale なし)
-    - checkpoint は 4_1_SDXL_checkpoint (sd15 時 3_1_SD15_checkpoint) からランダム
-    - Ctrl+C でループ停止
-    - A1111 互換メタを 4_8_SDXL_generated/{YYYYMMDDHHMMSS}.png (SDXL) または
-      3_8_SD15_generated/ (SD15) に書き込み
 """
 from __future__ import annotations
 
@@ -67,23 +59,16 @@ from dist_tensors import check_tensors
 # 定数
 # --------------------------------------------------------------------------- #
 ROOT             = Path(__file__).parent
-# --- 固定 dir 定義 (lane 非依存。extra_model_paths.yaml 生成にも使う) ---
-SD15_CHECKPOINT_DIR = ROOT / "3_1_SD15_checkpoint"
-SD15_LORA_DIR       = ROOT / "3_2_SD15_LoRA"
-SD15_EMBED_DIR      = ROOT / "3_3_SD15_Embedding"
+# --- 固定 dir 定義 (real ブランチは SDXL 1 レーンのみ) ---
 SDXL_CHECKPOINT_DIR = ROOT / "4_1_SDXL_checkpoint"
 SDXL_LORA_DIR       = ROOT / "4_2_SDXL_LoRA"
 SDXL_CONTROLNET_DIR = ROOT / "4_3_SDXL_ControlNet"
 SDXL_EMBED_DIR      = ROOT / "4_4_SDXL_Embedding"
-# --- アクティブ dir (既定 sdxl。--version sd15 で main() が SD15 に差し替え) ---
 CHECKPOINT_DIR   = SDXL_CHECKPOINT_DIR
 LORA_DIR         = SDXL_LORA_DIR
 EMBEDDING_DIR    = SDXL_EMBED_DIR
 CONTROLNET_DIR   = SDXL_CONTROLNET_DIR
 PROMPTS_DIR      = ROOT / "1_0_prompts"
-# 出力 dir は版ごとに分離 (SD15=3_8/3_9 / SDXL=5_1/5_2)。lane に応じて per-iteration で振り分ける
-SD15_GENERATED_DIR = ROOT / "3_8_SD15_generated"
-SD15_UPSCALED_DIR  = ROOT / "3_9_SD15_upscaled"
 SDXL_GENERATED_DIR = ROOT / "4_8_SDXL_generated"
 SDXL_UPSCALED_DIR  = ROOT / "4_9_SDXL_upscaled"
 WORKFLOW_DUMP_DIR = ROOT / "workflow_dump"   # --dump-workflow: 組んだ API workflow JSON の出力先
@@ -304,26 +289,19 @@ EXTRA_MODEL_PATHS_YAML = COMFYUI_DIR / "extra_model_paths.yaml"
 
 def write_extra_model_paths() -> bool:
     """playground の model dir を ComfyUI に認識させる extra_model_paths.yaml を
-    dir 定数から自動生成する。SD15(3_x) / SDXL(4_x) 両レーンを登録 (ComfyUI は
-    ファイル名で全 path を横断検索するので、--version に関係なく解決できる)。
+    dir 定数から自動生成する。real ブランチは SDXL 1 レーンのみ。
 
     内容が変わったら True を返す (= ComfyUI 再起動が必要)。
     dir リネームで yaml がズレて 400 になる事故を構造的に防ぐための自動生成。"""
     content = (
         "# 自動生成 (generate.py write_extra_model_paths)。手で編集しない。\n"
-        "# playground の model dir を ComfyUI に登録 (SD15=3_x / SDXL=4_x 両レーン)。\n"
+        "# playground の model dir を ComfyUI に登録 (real branch = SDXL only)。\n"
         "comfyui_playground:\n"
         f"    base_path: {ROOT.as_posix()}/\n"
         "    is_default: true\n"
-        "    checkpoints: |\n"
-        f"        {SD15_CHECKPOINT_DIR.name}/\n"
-        f"        {SDXL_CHECKPOINT_DIR.name}/\n"
-        "    loras: |\n"
-        f"        {SD15_LORA_DIR.name}/\n"
-        f"        {SDXL_LORA_DIR.name}/\n"
-        "    embeddings: |\n"
-        f"        {SD15_EMBED_DIR.name}/\n"
-        f"        {SDXL_EMBED_DIR.name}/\n"
+        f"    checkpoints: {SDXL_CHECKPOINT_DIR.name}/\n"
+        f"    loras: {SDXL_LORA_DIR.name}/\n"
+        f"    embeddings: {SDXL_EMBED_DIR.name}/\n"
         f"    controlnet: {SDXL_CONTROLNET_DIR.name}/\n"
     )
     old = EXTRA_MODEL_PATHS_YAML.read_text(encoding="utf-8") if EXTRA_MODEL_PATHS_YAML.exists() else ""
@@ -476,7 +454,7 @@ def build_workflow_txt2img(
     hires_steps: int = 20,
     vae_override: Optional[str] = None,
 ) -> dict:
-    """txt2img / img2img の workflow JSON を組み立てる (SD15 / SDXL 共通)。
+    """txt2img / img2img の workflow JSON を組み立てる (SDXL 用)。
 
     LoRA stacking 対応: loras = [(lora_name.safetensors, strength), ...] を渡すと
     CheckpointLoaderSimple と CLIPTextEncode/KSampler の間に LoraLoader をチェーン挿入する。
@@ -487,10 +465,9 @@ def build_workflow_txt2img(
 
     Hires Fix (hires_fix=True): width/height を **base 解像度** (= 1段目 sampling 解像度)
     として扱い、LatentUpscaleBy(scale) → 2 段目 KSampler(hires_denoise) で refine →
-    最終 latent は width×scale × height×scale で VAEDecode。memory 「Hires Fix 既定 ON
-    (512→768 二段)」を ComfyUI 版に移植した実装で、引数の width/height は **必ず base 側**
-    (SD15 なら 512〜768、SDXL なら 1024 等のネイティブ解像度) を渡す。Hires Fix off のときは
-    width/height がそのまま最終解像度。txt2img / img2img どちらでも動く。
+    最終 latent は width×scale × height×scale で VAEDecode。SDXL のネイティブ解像度 1024 等を
+    base 側として渡す。Hires Fix off のときは width/height がそのまま最終解像度。
+    txt2img / img2img どちらでも動く。
     """
     # Hires Fix は width/height を base として扱うので、追加の縮小は不要
     base_w, base_h = width, height
@@ -543,7 +520,6 @@ def build_workflow_txt2img(
     }
     # latent ソース: txt2img は EmptyLatentImage、img2img (init_image 指定) は
     # LoadImage → ImageScale(width×height) → VAEEncode で init latent を作り、denoise<1 で再描画。
-    # SD15 下書き → SDXL 清書チェーンの「清書」段がこの img2img 経路を使う。
     if init_image:
         # node ID は 40-42 を使う (ADetailer 部位ループが 26-31 を使うため衝突回避)
         # init_image は base 解像度にスケール (Hires Fix 段で 1.5× にアップ)
@@ -1097,19 +1073,11 @@ def ensure_adetailer_model(rel_name: Optional[str]) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 VAE_DIR = COMFYUI_DIR / "models" / "vae"
 
-# (repo, hf_file, local_name) for each lane
+# (repo, hf_file, local_name)
 _SDXL_VAE_FIX = (
     "madebyollin/sdxl-vae-fp16-fix",
     "sdxl_vae.safetensors",
     "sdxl_vae_fp16_fix.safetensors",
-)
-# SD15 用安定版: 定番の sd-vae-ft-mse-840000 (fp16 オーバーフロー耐性あり)。
-# checkpoint 同梱 VAE は fp16 で NaN/Inf を吐き、特定ピクセルだけ原色化する
-# (グレースケール脱色 + マゼンタ/紫のスペック) 問題が出るため。
-_SD15_VAE_FIX = (
-    "stabilityai/sd-vae-ft-mse-original",
-    "vae-ft-mse-840000-ema-pruned.safetensors",
-    "sd_vae_ft_mse_840000.safetensors",
 )
 
 
@@ -1140,13 +1108,6 @@ def ensure_sdxl_vae_fix() -> Optional[str]:
     """madebyollin/sdxl-vae-fp16-fix を ComfyUI/models/vae/ に配置しファイル名を返す。
     SDXL ckpt 同梱 VAE の round-trip 茶色フィルム化対策 (2026-06-11)。"""
     return _ensure_vae(*_SDXL_VAE_FIX)
-
-
-def ensure_sd15_vae_mse() -> Optional[str]:
-    """stabilityai/sd-vae-ft-mse-original (vae-ft-mse-840000-ema-pruned) を
-    ComfyUI/models/vae/ に配置しファイル名を返す。SD15 ckpt 同梱 VAE の
-    fp16 オーバーフロー (グレースケール脱色 + マゼンタスペック) 対策 (2026-06-13)。"""
-    return _ensure_vae(*_SD15_VAE_FIX)
 
 
 # --------------------------------------------------------------------------- #
@@ -1275,11 +1236,6 @@ def _gather_checkpoints(dirs: list[Path]) -> list[Path]:
     return sorted(out, key=lambda p: p.name)
 
 
-def checkpoint_version(path: Path) -> str:
-    """checkpoint の版を置き場 dir で判定 (tensors.py が分類済なので確実)。"""
-    return "sd15" if path.parent == SD15_CHECKPOINT_DIR else "sdxl"
-
-
 def _is_pony_name(stem: str) -> bool:
     """ファイル名から Pony 系かを推定 (pony / pdxl / pny / pxl / xlp を含む)。
     ユーザは収集時に pony/pny/pxl/xlp を意図的に付与 (無記載=オリジナル名)。"""
@@ -1343,19 +1299,13 @@ def pick_checkpoint(
     fixed_name: Optional[str] = None,
     pool_dirs: Optional[list[Path]] = None,
 ) -> Path:
-    """checkpoint を抽選 (`checkpoint.toml` 連動)。
+    """checkpoint を抽選 (`checkpoint.toml` 連動)。real ブランチは SDXL 1 レーン。
 
-    `pool_dirs` を渡すと複数 dir (SD15 3_1 + SDXL 4_1 等) を統合プールとして扱う。
-    SD15 と SDXL を両方含む multi-lane プールの場合は、**先に 25/75 (SD15/SDXL) で版を
-    決め、版内で重み付き抽選**する (2026-06-13)。版ごとの fast/slow スケールが大きく違うので、
-    全候補横断の `max_slow` で weight を計算すると常に速い側 (SD15) に偏ってしまうため。
-    `--version sdxl|sd15` で単一版に絞った場合や 1 dir 指定なら従来どおり 1 段抽選。
-
-    ルール (各版/単一プール内):
+    ルール:
         - `fixed_name` 指定 (= `--checkpoint NAME`) → そのまま返す
         - state['count'] == 0 (1 度め) + 未計測あり → 未計測からランダム
         - 2 度め以降 → 2/3 確率で計測済み (重み付き)、1/3 確率で未計測ランダム
-        - 計測済み内の重み: `max(1, (max_slow*2 - (fast + slow)) / 2 + like)` (版内 max_slow)
+        - 計測済み内の重み: `max(1, (max_slow*2 - (fast + slow)) / 2 + like)`
         - 片方しか無ければそちらに寄せる
     """
     dirs = pool_dirs or [CHECKPOINT_DIR]
@@ -1365,18 +1315,8 @@ def pick_checkpoint(
     if fixed_name:
         return _resolve_checkpoint_name(fixed_name, dirs)
 
-    # multi-lane (SD15+SDXL 両方候補あり) なら 25/75 (SD15/SDXL) で先に版を決める
-    # SDXL 偏重: VAE 安定化 + 1 発描き統一で SDXL が常用となったため (旧 50/50 → 2026-06-13)
-    SD15_LANE_PROB = 0.25
-    sd15_pool = [c for c in candidates if checkpoint_version(c) == "sd15"]
-    sdxl_pool = [c for c in candidates if checkpoint_version(c) == "sdxl"]
-    if sd15_pool and sdxl_pool:
-        lane_candidates = sd15_pool if random.random() < SD15_LANE_PROB else sdxl_pool
-    else:
-        lane_candidates = candidates  # 片方のみ → そのまま
-
-    scored   = [c for c in lane_candidates if c.stem in data]
-    unscored = [c for c in lane_candidates if c.stem not in data]
+    scored   = [c for c in candidates if c.stem in data]
+    unscored = [c for c in candidates if c.stem not in data]
 
     first_pick = state.get("count", 0) == 0
     state["count"] = state.get("count", 0) + 1
@@ -1416,7 +1356,7 @@ def _weighted_pick_scored(scored: list[Path], data: dict) -> Path:
 # プロンプト後処理: LoRA キーワードを (0.8/N) 重み付けで positive に append
 # --------------------------------------------------------------------------- #
 def collect_negative_embeddings(embed_dir: Optional[Path] = None) -> list[str]:
-    """`embed_dir` (既定 EMBEDDING_DIR、sdxl=4_4 / sd15=3_2) 配下から負のクオリティ embedding を集める。
+    """`embed_dir` (既定 EMBEDDING_DIR = 4_4) 配下から負のクオリティ embedding を集める。
 
     判定: stem を lowercase して `neg` / `bad` / `worst` を含むものを採用。
     例: `PonyXL_NegScore-neg.safetensors` / `SmoothNegative_Hands-neg.safetensors` 等。
@@ -1501,8 +1441,7 @@ def prepare_workflow_prompt(
 
     # family-gate: 非 Pony SDXL base に Pony LoRA を載せると崩壊するので除外
     is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
-    ckpt_lane = checkpoint_version(checkpoint_path)
-    if loras and ckpt_lane == "sdxl" and not is_pony:
+    if loras and not is_pony:
         dropped = [p.name for p, _ in loras if _is_pony_name(p.stem)]
         if dropped:
             loras = [(p, s) for p, s in loras if not _is_pony_name(p.stem)]
@@ -1720,14 +1659,13 @@ def main() -> None:
                            "LoRA keyword list for --prompt sentence (comma-separated)"))
     ap.add_argument("--png", type=str, default=None,
                     help=L("画質アップ refine 用 PNG (1_0_prompts/ 配下 or 絶対パス)。"
-                           "その画像を SDXL img2img で描き直して SD15→SDXL 画質に上げる (1 枚で終了)",
+                           "その画像を SDXL img2img で描き直して画質を上げる (1 枚で終了)",
                            "PNG for quality-up refine (under 1_0_prompts/ or absolute path). "
-                           "Redraws the image via SDXL img2img to upgrade quality to SDXL level (single image, then exits)"))
+                           "Redraws the image via SDXL img2img to upgrade quality (single image, then exits)"))
     ap.add_argument("--png-sentence", type=str, default=None,
                     help=L("PNG の埋込プロンプト『文章』で生成する PNG (画像は使わない)。"
-                           "統合抽選 (SD15/SDXL→1/2段) で連続量産。--prompt original と併用で全メタ流用",
+                           "--prompt original と併用で全メタ流用",
                            "PNG whose embedded prompt sentence is used for generation (image itself is not used). "
-                           "Continuous high-volume generation via unified draw (SD15/SDXL→1/2-stage). "
                            "Combine with --prompt original to reuse all metadata"))
     ap.add_argument("--refine-denoise", type=float, default=0.5,
                     help=L("--png refine の img2img denoise (既定 0.5。低=元忠実 / 高=SDXL が大きく描き直す)",
@@ -1752,18 +1690,11 @@ def main() -> None:
                     help=L("--pose 指定時の controlnet_conditioning_scale (既定 1.0、骨格は強めが効く)",
                            "controlnet_conditioning_scale when --pose is specified (default 1.0, stronger works better for skeleton)"))
     ap.add_argument("--gear", choices=["low", "high"], default="high",
-                    help=L("low=ラフ (steps 30、SD15 は高 step でつぶれるので低め) / high=本番 (steps 50、既定)。"
-                           "SD15/SDXL とも 1 発描き (2 段チェーン廃止)",
-                           "low=rough (steps 30, SD15 collapses at high steps) / high=production (steps 50, default). "
-                           "Both SD15 and SDXL are single-pass (two-stage chain removed)"))
+                    help=L("low=ラフ (steps 30) / high=本番 (steps 50、既定)",
+                           "low=rough (steps 30) / high=production (steps 50, default)"))
     ap.add_argument("--arch", choices=["cuda", "cpu"], default="cuda",
-                    help=L("ComfyUI 側 device 切替 (Phase 1 では参考扱い、ComfyUI 起動時に決まる)",
-                           "ComfyUI device selection (informational in Phase 1; determined at ComfyUI startup)"))
-    ap.add_argument("--version", choices=["auto", "sdxl", "sd15"], default="auto",
-                    help=L("checkpoint 抽選プールの絞り込み。auto=SD15+SDXL 統合 (既定) / sdxl=4_1 のみ / sd15=3_1 のみ。"
-                           "当選 checkpoint の版で SD15/SDXL とも 1 発描き",
-                           "narrow the checkpoint draw pool. auto=unified SD15+SDXL (default) / sdxl=4_1 only / sd15=3_1 only. "
-                           "Both versions render single-pass"))
+                    help=L("ComfyUI 側 device 切替 (参考扱い、ComfyUI 起動時に決まる)",
+                           "ComfyUI device selection (informational; determined at ComfyUI startup)"))
     ap.add_argument("--checkpoint", type=str, default=None,
                     help=L("checkpoint を固定。NAME or NAME.safetensors",
                            "fix checkpoint. NAME or NAME.safetensors"))
@@ -1772,15 +1703,15 @@ def main() -> None:
                     help=L("seed を固定 (再現/比較用。未指定なら毎枚 random)",
                            "fix seed (for reproduction/A-B compare. default: random per image)"))
     ap.add_argument("--width", type=int, default=None,
-                    help=L("生成幅 (未指定: sdxl=1024 / sd15=512)", "generation width (default: sdxl=1024 / sd15=512)"))
+                    help=L("生成幅 (未指定: 1024)", "generation width (default: 1024)"))
     ap.add_argument("--height", type=int, default=None,
-                    help=L("生成高さ (未指定: sdxl=1024 / sd15=512)", "generation height (default: sdxl=1024 / sd15=512)"))
+                    help=L("生成高さ (未指定: 1024)", "generation height (default: 1024)"))
     ap.add_argument("--many-width", type=int, default=None,
-                    help=L("many=true のとき使う幅 (未指定: sdxl=1216 / sd15=768、横長で複数人の融合抑制)",
-                           "width when many=true (default: sdxl=1216 / sd15=768, landscape to suppress multi-person merging)"))
+                    help=L("many=true のとき使う幅 (未指定: 1216、横長で複数人の融合抑制)",
+                           "width when many=true (default: 1216, landscape to suppress multi-person merging)"))
     ap.add_argument("--many-height", type=int, default=None,
-                    help=L("many=true のとき使う高さ (未指定: sdxl=832 / sd15=512)",
-                           "height when many=true (default: sdxl=832 / sd15=512)"))
+                    help=L("many=true のとき使う高さ (未指定: 832)",
+                           "height when many=true (default: 832)"))
     ap.add_argument("--many", action="store_true",
                     help=L("複数人モードを強制 ON (横長キャンバスで生成)。--sentence/--png 等 "
                            "prompt.toml 由来でない入力で複数人を描くとき指定。auto モードでは "
@@ -1802,15 +1733,13 @@ def main() -> None:
                            "maximum number of stacked LoRAs per image (random.randint(min, max), default 5, "
                            "1 for no stacking, 0 to disable entirely)"))
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
-                    help=L("Real-ESRGAN x4 アップスケール (SDXL=4_9_SDXL_upscaled / SD15=3_9_SD15_upscaled に出力)。"
+                    help=L("Real-ESRGAN x4 アップスケール (4_9_SDXL_upscaled に出力)。"
                            "既定: gear high で ON / gear low で OFF。明示すれば上書き",
-                           "Real-ESRGAN x4 upscale (output to 4_9_SDXL_upscaled / 3_9_SD15_upscaled by lane). "
+                           "Real-ESRGAN x4 upscale (output to 4_9_SDXL_upscaled). "
                            "Default: ON for gear high / OFF for gear low. Explicit flag overrides"))
     ap.add_argument("--upscale-model", type=str, default=None,
-                    help=L("アップスケール用 Real-ESRGAN モデル名 (既定: style=anime → anime6B、"
-                           "real → x4plus、mix/空 → anime6B)",
-                           "Real-ESRGAN model name for upscaling (default: style=anime → anime6B, "
-                           "real → x4plus, mix/empty → anime6B)"))
+                    help=L("アップスケール用 Real-ESRGAN モデル名 (既定: style=real → x4plus、anime → anime6B)",
+                           "Real-ESRGAN model name for upscaling (default: style=real → x4plus, anime → anime6B)"))
     ap.add_argument("--adetailer", action=argparse.BooleanOptionalAction, default=None,
                     help=L("ADetailer (顔/手 YOLO inpainting)。既定: gear high で ON / low で OFF",
                            "ADetailer (face/hand YOLO inpainting). Default: ON for gear high / OFF for low"))
@@ -1834,19 +1763,10 @@ def main() -> None:
                     help=L("ADetailer 各 detected region のステップ数 (既定 30)",
                            "ADetailer inference steps per detected region (default 30)"))
     ap.add_argument("--sdxl-vae", action=argparse.BooleanOptionalAction, default=True,
-                    help=L("SDXL ckpt のとき madebyollin/sdxl-vae-fp16-fix を自動 DL + 使用 (既定 ON)。"
-                           "checkpoint 同梱 VAE の round-trip 色シフト (person ADetailer の茶色化) 対策。"
-                           "SD15 ckpt には無影響",
-                           "Use madebyollin/sdxl-vae-fp16-fix for SDXL checkpoints (auto-download, default ON). "
-                           "Mitigates round-trip color shift from bundled VAE (person ADetailer sepia bug). "
-                           "No effect on SD15 checkpoints"))
-    ap.add_argument("--sd15-vae", action=argparse.BooleanOptionalAction, default=True,
-                    help=L("SD15 ckpt のとき stabilityai/sd-vae-ft-mse-original を自動 DL + 使用 (既定 ON)。"
-                           "checkpoint 同梱 VAE の fp16 オーバーフロー (グレースケール脱色 + マゼンタスペック) 対策。"
-                           "SDXL ckpt には無影響",
-                           "Use stabilityai/sd-vae-ft-mse-original for SD15 checkpoints (auto-download, default ON). "
-                           "Mitigates fp16 VAE overflow (greyscale desaturation + magenta speckles). "
-                           "No effect on SDXL checkpoints"))
+                    help=L("madebyollin/sdxl-vae-fp16-fix を自動 DL + 使用 (既定 ON)。"
+                           "checkpoint 同梱 VAE の round-trip 色シフト (person ADetailer の茶色化) 対策",
+                           "Use madebyollin/sdxl-vae-fp16-fix (auto-download, default ON). "
+                           "Mitigates round-trip color shift from bundled VAE (person ADetailer sepia bug)"))
     ap.add_argument("--hires-fix", action=argparse.BooleanOptionalAction, default=None,
                     help=L("Hires Fix (低解像度→1.5×二段)。draft / 清書段の両方に効く。"
                            "既定: gear high で ON / low で OFF",
@@ -1862,8 +1782,8 @@ def main() -> None:
                     help=L("Hires Fix 2 段目 step 数 (既定 20)",
                            "Hires Fix 2nd-pass steps (default 20)"))
     ap.add_argument("--embeddings", action=argparse.BooleanOptionalAction, default=True,
-                    help=L("Embedding dir (sdxl=4_4 / sd15=3_2) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)",
-                           "auto-inject negative quality embeddings (`*-neg` etc.) from embedding dir (sdxl=4_4 / sd15=3_2) into negative (default ON)"))
+                    help=L("Embedding dir (4_4_SDXL_Embedding) から負のクオリティ embedding (`*-neg` 等) を negative に自動投入 (既定 ON)",
+                           "auto-inject negative quality embeddings (`*-neg` etc.) from 4_4_SDXL_Embedding into negative (default ON)"))
     ap.add_argument("--quality-prefix", type=str, default="",
                     help=L("positive の先頭に常時前置する quality タグ列 (例 'score_9, score_8_up, score_7_up')。"
                            "checkpoint の系統に合わせて指定。--pony 指定時は Pony 標準値が自動で入る",
@@ -1889,27 +1809,16 @@ def main() -> None:
                            "Dumps a single-pass workflow for one image then exits immediately (refine disabled)"))
     args = ap.parse_args()
 
-    # --version は checkpoint 抽選プールの絞り込みのみ (auto=両レーン統合)。当選 checkpoint の版で 1 発描き。
-    if args.version == "sd15":
-        pool_dirs = [SD15_CHECKPOINT_DIR]
-    elif args.version == "sdxl":
-        pool_dirs = [SDXL_CHECKPOINT_DIR]
-    else:  # auto
-        pool_dirs = [SD15_CHECKPOINT_DIR, SDXL_CHECKPOINT_DIR]
+    pool_dirs = [SDXL_CHECKPOINT_DIR]
 
-    # 解像度は当選版で決まる (loop の lane_resolution で per-pick 解決)。
-    # 明示があればそれ優先、無ければ sd15=512 / sdxl=1024、many は sd15=768x512 / sdxl=1216x832。
-    def lane_resolution(lane: str, many: bool) -> tuple[int, int]:
-        if lane == "sd15":
-            w, h, mw, mh = args.width or 512, args.height or 512, args.many_width or 768, args.many_height or 512
-        else:
-            w, h, mw, mh = args.width or 1024, args.height or 1024, args.many_width or 1216, args.many_height or 832
+    # 解像度: 明示が無ければ SDXL ネイティブ 1024 (many=1216x832 の横長で複数人融合抑制)
+    def resolution(many: bool) -> tuple[int, int]:
+        w, h = args.width or 1024, args.height or 1024
+        mw, mh = args.many_width or 1216, args.many_height or 832
         return (mw, mh) if many else (w, h)
 
     # quality 前置の確定: --quality-prefix 明示 > --pony 標準値 > 無し
-    # quality 前置の方針 (実際の付与は清書/単一段で family を見て per-checkpoint に行う):
     #   明示 --quality-prefix > --pony (全 checkpoint に強制) > family=="pony" の checkpoint に自動
-    # SD15 下書き段には前置しない (Pony は SDXL のみ)。
     explicit_prefix = args.quality_prefix.strip()
     if explicit_prefix:
         print(L(f"[quality prefix] 明示 (全 checkpoint): {explicit_prefix}",
@@ -1941,22 +1850,17 @@ def main() -> None:
     if args.hires_fix is None:
         args.hires_fix = (args.gear == "high")
 
-    pool_label = {"auto": "SD15+SDXL", "sd15": "SD15", "sdxl": "SDXL"}[args.version]
     print(f"=== generate.py ===")
-    print(f"checkpoint pool: {pool_label}  prompt mode: {args.prompt}  "
+    print(f"checkpoint pool: SDXL  prompt mode: {args.prompt}  "
           f"gear: {args.gear} (steps={steps})  arch: {args.arch}  "
           f"upscale: {args.upscale}  adetailer: {args.adetailer}  "
           f"hires_fix: {args.hires_fix}")
-    if args.gear == "high":
-        print(L(f"  gear high: SD15/SDXL とも 1 発描き (steps={steps})",
-                f"  gear high: single-pass for both SD15 and SDXL (steps={steps})"))
 
     print(f"\n--- tensors triage ---")
     counts = check_tensors()
     print(f"  SDXL: ckpt={counts['checkpoint']} LoRA={counts['lora']} "
           f"embed={counts['embedding']} CN={counts['controlnet']}   "
-          f"SD15: ckpt={counts['sd15_checkpoint']} LoRA={counts['sd15_lora']} "
-          f"embed={counts['sd15_embedding']}   error={counts['error']}")
+          f"error={counts['error']}")
     if not _gather_checkpoints(pool_dirs):
         raise SystemExit(L(f"\n抽選プール ({', '.join(d.name for d in pool_dirs)}) に "
                            f"checkpoint がありません。先に 2_0_tensors に投入を",
@@ -1972,35 +1876,23 @@ def main() -> None:
     print(f"  OK: {COMFY_BASE} (device={cur_device})")
 
     client_id = uuid.uuid4().hex
-    SD15_GENERATED_DIR.mkdir(exist_ok=True)
     SDXL_GENERATED_DIR.mkdir(exist_ok=True)
     if args.upscale:
-        SD15_UPSCALED_DIR.mkdir(exist_ok=True)
         SDXL_UPSCALED_DIR.mkdir(exist_ok=True)
 
     # checkpoint.toml 連携の state
     checkpoint_data = load_checkpoint_toml()
     pick_state: dict = {}
 
-    # LoRA / neg embedding を両レーン分まとめて準備 (起動時 1 回)。
-    # 統合抽選で SD15/SDXL どちらが当選しても、その版の LoRA・embed を使えるようにする。
+    # LoRA / neg embedding を起動時 1 回準備
     lora_keywords_data = load_lora_keywords_toml()
     sdxl_lora_subjects = load_sdxl_lora_subjects()  # {stem: subject}。pose は OpenPose 段で除外
 
-    def _prep_lane(lora_dir: Path, embed_dir: Path) -> dict:
-        loras = sorted(lora_dir.glob("*.safetensors")) if args.lora_stack_max > 0 else []
-        corpus = build_lora_corpus_for_playground(loras, lora_keywords_data) if loras else {}
-        negs = collect_negative_embeddings(embed_dir) if args.embeddings else []
-        return {"loras": loras, "corpus": corpus, "neg": negs, "lora_dir": lora_dir}
-
-    lane_assets = {
-        "sdxl": _prep_lane(SDXL_LORA_DIR, SDXL_EMBED_DIR),
-        "sd15": _prep_lane(SD15_LORA_DIR, SD15_EMBED_DIR),
-    }
-    for ln in ("sdxl", "sd15"):
-        a = lane_assets[ln]
-        print(L(f"  [{ln}] LoRA 候補: {len(a['loras'])} 件 / neg embed: {len(a['neg'])} 件",
-                f"  [{ln}] LoRA candidates: {len(a['loras'])} / neg embed: {len(a['neg'])}"))
+    sdxl_loras = sorted(SDXL_LORA_DIR.glob("*.safetensors")) if args.lora_stack_max > 0 else []
+    sdxl_corpus = build_lora_corpus_for_playground(sdxl_loras, lora_keywords_data) if sdxl_loras else {}
+    sdxl_neg_embeds = collect_negative_embeddings(SDXL_EMBED_DIR) if args.embeddings else []
+    print(L(f"  LoRA 候補: {len(sdxl_loras)} 件 / neg embed: {len(sdxl_neg_embeds)} 件",
+            f"  LoRA candidates: {len(sdxl_loras)} / neg embed: {len(sdxl_neg_embeds)}"))
 
     # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
     face_model = person_model = hand_model = None
@@ -2013,15 +1905,11 @@ def main() -> None:
                     "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
             args.adetailer = False
 
-    # 各版の安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
+    # 安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
     sdxl_vae_name: Optional[str] = ensure_sdxl_vae_fix() if args.sdxl_vae else None
-    sd15_vae_name: Optional[str] = ensure_sd15_vae_mse() if args.sd15_vae else None
     if sdxl_vae_name:
         print(L(f"  [vae] SDXL 用 VAE 差し替え: {sdxl_vae_name}",
                 f"  [vae] SDXL VAE override: {sdxl_vae_name}"), flush=True)
-    if sd15_vae_name:
-        print(L(f"  [vae] SD15 用 VAE 差し替え: {sd15_vae_name}",
-                f"  [vae] SD15 VAE override: {sd15_vae_name}"), flush=True)
 
     # --pose 指定時: ソース PNG を起動時 1 回 resolve + upload (ループ内で使い回す)
     pose_png: Optional[Path] = None
@@ -2061,19 +1949,17 @@ def main() -> None:
             is_refine = bool(extras.get("refine"))  # 画質アップ (PNG を init に SDXL img2img、1枚)
             # quality 前置は清書/単一段 (SDXL) で family を見て付与する (下書き段には付けない)。
 
-            # checkpoint 抽選: refine は SDXL 専用プール (画質アップ目的)、他は --version プール
+            # checkpoint 抽選
             fixed_checkpoint = args.checkpoint
             if "model" in extras:
                 fixed_checkpoint = extras["model"]
-            iter_pool = [SDXL_CHECKPOINT_DIR] if is_refine else pool_dirs
-            checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, fixed_checkpoint, pool_dirs=iter_pool)
-            ckpt_lane = checkpoint_version(checkpoint_path)  # 当選版 (3_1=sd15 / 4_1=sdxl)
+            checkpoint_path = pick_checkpoint(checkpoint_data, pick_state, fixed_checkpoint, pool_dirs=pool_dirs)
             seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
             many = bool(extras.get("many") or args.many)
 
             print(f"\n=== source {total+1} ===")
 
-            # SD15/SDXL とも 1 発描き。--png refine だけは init_image を入れた img2img として走る
+            # SDXL 1 発描き。--png refine だけは init_image を入れた img2img として走る
             init_image_name: Optional[str] = None
             if is_refine:
                 init_image_name = upload_image_to_comfyui(src_png)
@@ -2083,11 +1969,9 @@ def main() -> None:
                         f"  [refine] quality-up {src_png.name} via SDXL img2img "
                         f"(denoise {args.refine_denoise})"), flush=True)
             else:
-                pipeline_label = f"{ckpt_lane.upper()} single-pass"
+                pipeline_label = "SDXL single-pass"
 
-            # ---- 清書 / 単一パス stage (active lane = ckpt_lane の資産を使う) ----
-            active = lane_assets[ckpt_lane]
-            gen_width, gen_height = lane_resolution(ckpt_lane, many)
+            gen_width, gen_height = resolution(many)
             if is_refine:
                 # 元 PNG のアスペクトを保ったまま ~1MP (SDXL ネイティブ) にスケール
                 from PIL import Image as _PILImage
@@ -2100,13 +1984,13 @@ def main() -> None:
             inference_bonus = int(entry.get("inference", 0))
             use_steps = max(1, steps + inference_bonus)
 
-            # LoRA: original モードは PNG 由来、それ以外は active lane で keyword 抽選
+            # LoRA: original モードは PNG 由来、それ以外は keyword 抽選
             picked_loras: list[tuple[Path, float]] = []
             if "loras" in extras:
                 for name, strength in extras["loras"]:
-                    cand = active["lora_dir"] / name
+                    cand = SDXL_LORA_DIR / name
                     if not cand.exists():
-                        cand2 = active["lora_dir"] / f"{name}.safetensors" if not name.endswith(".safetensors") else cand
+                        cand2 = SDXL_LORA_DIR / f"{name}.safetensors" if not name.endswith(".safetensors") else cand
                         if cand2.exists():
                             cand = cand2
                         else:
@@ -2114,9 +1998,9 @@ def main() -> None:
                             f"  [warn] LoRA from PNG metadata not found: {name}, skipping"), flush=True)
                             continue
                     picked_loras.append((cand, float(strength)))
-            elif args.gear == "high" and active["loras"] and args.lora_stack_max > 0:
+            elif args.gear == "high" and sdxl_loras and args.lora_stack_max > 0:
                 picked = pick_n_loras_by_keywords(
-                    active["loras"], lora_keywords, active["corpus"],
+                    sdxl_loras, lora_keywords, sdxl_corpus,
                     n_max=args.lora_stack_max, n_min=args.lora_stack_min,
                 )
                 if picked:
@@ -2124,12 +2008,12 @@ def main() -> None:
                     strength = args.lora_scale / n
                     picked_loras = [(p, strength) for p in picked]
 
-            # ControlNet 抽選 (SDXL stage のみ。SD15 stage に SDXL CN は載らない)
+            # ControlNet 抽選
             picked_controlnet: Optional[Path] = None
             controlnet_mode = "passthrough"
             controlnet_upload_name: Optional[str] = None
             effective_cn_strength = args.controlnet_strength
-            if args.gear == "high" and not args.no_controlnet and ckpt_lane == "sdxl" and not is_refine:
+            if args.gear == "high" and not args.no_controlnet and not is_refine:
                 if pose_upload_name is not None:
                     picked_controlnet = pick_controlnet("", args.controlnet, force_openpose=True)
                     if picked_controlnet is not None:
@@ -2149,7 +2033,7 @@ def main() -> None:
                             picked_controlnet = None
 
             print(f"  path      : {pipeline_label}")
-            print(f"  checkpoint: {checkpoint_path.name} ({ckpt_lane.upper()})"
+            print(f"  checkpoint: {checkpoint_path.name}"
                   f"{L(' (未計測)', ' (unscored)') if checkpoint_path.stem not in checkpoint_data else ''}")
             print(f"  positive  : {positive[:120]}{'...' if len(positive) > 120 else ''}")
             print(f"  negative  : {negative[:80]}{'...' if len(negative) > 80 else ''}")
@@ -2185,7 +2069,7 @@ def main() -> None:
                 picked_loras=picked_loras,
                 checkpoint_path=checkpoint_path,
                 checkpoint_data=checkpoint_data,
-                neg_embed_stems=active["neg"],
+                neg_embed_stems=sdxl_neg_embeds,
                 explicit_quality_prefix=explicit_prefix,
                 force_pony_prefix=args.pony,
                 controlnet_mode=controlnet_mode,
@@ -2219,8 +2103,7 @@ def main() -> None:
                 adetailer_steps=args.adetailer_steps,
                 hires_fix=args.hires_fix, hires_scale=args.hires_scale,
                 hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
-                # SDXL ckpt のときだけ安定 VAE を被せる (SD15 には流用不可)
-                vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else sd15_vae_name,
+                vae_override=sdxl_vae_name,
             )
             if args.adetailer:
                 parts = [f"face={face_model}"]
@@ -2234,7 +2117,7 @@ def main() -> None:
                 print(f"  upscale: {upscale_model_name}")
 
             if args.dump_workflow or args.dump_only:
-                kind = "refine" if is_refine else f"{ckpt_lane}_single"
+                kind = "refine" if is_refine else "sdxl_single"
                 _dump_workflow(workflow, kind)
             if args.dump_only:
                 print(L("  [dump-only] ComfyUI への投入はスキップ。"
@@ -2249,7 +2132,7 @@ def main() -> None:
             result = wait_for_completion_ws(prompt_id, client_id)
 
             outputs = result.get("outputs", {})
-            # node 7 = 通常解像度 (版に応じて 3_8_SD15_generated / 4_8_SDXL_generated)
+            # node 7 = 通常解像度 (4_8_SDXL_generated)
             save_node = outputs.get("7", {})
             images = save_node.get("images", [])
             if not images:
@@ -2262,8 +2145,7 @@ def main() -> None:
                                      img_info.get("type", "output"))
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            # 出力 dir は ckpt の版で振り分け (SD15=3_8 / SDXL=5_1)
-            gen_dir = SDXL_GENERATED_DIR if ckpt_lane == "sdxl" else SD15_GENERATED_DIR
+            gen_dir = SDXL_GENERATED_DIR
             out_path = gen_dir / f"{ts}.png"
             # 画像の最終解像度 (Hires Fix on のとき base × scale)。メタ Size はここを書く
             final_w = int(gen_width * args.hires_scale) if args.hires_fix else gen_width
@@ -2291,7 +2173,7 @@ def main() -> None:
             if is_refine:
                 stop["flag"] = True  # --png refine は 1 枚で終了 (この後の upscale 保存まではやる)
 
-            # node 14 = アップスケール後 (版に応じて 3_9_SD15_upscaled / 4_9_SDXL_upscaled)
+            # node 14 = アップスケール後 (4_9_SDXL_upscaled)
             if upscale_model_name:
                 up_node = outputs.get("14", {})
                 up_images = up_node.get("images", [])
@@ -2300,7 +2182,7 @@ def main() -> None:
                     up_bytes = fetch_image(up_info["filename"],
                                             up_info.get("subfolder", ""),
                                             up_info.get("type", "output"))
-                    up_dir = SDXL_UPSCALED_DIR if ckpt_lane == "sdxl" else SD15_UPSCALED_DIR
+                    up_dir = SDXL_UPSCALED_DIR
                     up_path = up_dir / f"{ts}.png"
                     save_with_a1111_metadata(
                         up_bytes, up_path,

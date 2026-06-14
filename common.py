@@ -573,7 +573,8 @@ def classify_tensor(path: Path) -> str:
 
 
 def detect_sd_version(path: Path) -> str:
-    """SD15 / SDXL を判別。メタデータのみ参照。"""
+    """SD15 / SDXL を判別。メタデータのみ参照。
+    real ブランチは SDXL のみ受け入れ、それ以外は dist_tensors で ERROR_DIR 行き。"""
     from safetensors import safe_open
     with safe_open(str(path), framework="pt") as f:
         keys = list(f.keys())
@@ -589,6 +590,7 @@ def detect_sd_version(path: Path) -> str:
 
 def detect_controlnet_version(path: Path) -> str | None:
     """ControlNet が SD15 / SDXL のどちら向けか推定。判定不能は None。
+    real ブランチは SDXL のみ。CN は手動配置で scan しないので参照頻度は低い。
 
     判定基準:
       - cross-attention の to_k / to_q の最終次元 (= cross-attention context dim)
@@ -619,6 +621,7 @@ def detect_controlnet_version(path: Path) -> str | None:
 
 def lora_target_version(path: Path) -> str | None:
     """LoRA が SD15 / SDXL のどちら向けか推定。判定不能は None。
+    real ブランチは SDXL のみ受け入れ、それ以外は dist_tensors で ERROR_DIR 行き。
 
     注意: to_k/to_v は self-attn(attn1) と cross-attn(attn2) が混在し、最初に見つけた
     to_k (self-attn の 320/640/1280 次元) で即断すると SDXL を SD15 と誤判定する。
@@ -649,6 +652,7 @@ def lora_target_version(path: Path) -> str | None:
 
 def detect_embedding_version(path: Path) -> str | None:
     """Textual Inversion Embedding が SD15 / SDXL のどちら向けか推定。判定不能は None。
+    real ブランチは SDXL のみ受け入れ、それ以外は dist_tensors で ERROR_DIR 行き。
 
     判定基準:
       - keys に `clip_g` / `clip_g_text_model` / `text_encoder_2` / `_te2_` 等を含む → SDXL
