@@ -1275,14 +1275,14 @@ class GenerateGUI:
 
             # LoRA 決定:
             #   ① 手動選択あり → そのまま
-            #   ② 手動選択なし & キーワードあり → pick_n_loras_by_keywords で 1-3 個抽選
+            #   ② 手動選択なし & キーワードあり → pick_n_loras_by_keywords で 1-8 個抽選
             #   ③ 手動選択なし & キーワードなし → LoRA 無し
             if this_manual:
                 this_loras = this_manual
             elif iter_kws:
                 corpus = build_lora_corpus(this_pool, lora_params_cache)
                 picked = pick_n_loras_by_keywords(
-                    this_pool, iter_kws, corpus, n_max=3, n_min=1,
+                    this_pool, iter_kws, corpus, n_max=8, n_min=1,
                 )
                 scale = lora_total / max(1, len(picked))
                 this_loras = [(p, scale) for p in picked]

@@ -1499,15 +1499,24 @@ def prepare_workflow_prompt(
             logs.append(L(f"  [pose-gate] OpenPose 有効 → pose LoRA 除外: {', '.join(dropped)}",
                           f"  [pose-gate] OpenPose active → dropping pose LoRAs: {', '.join(dropped)}"))
 
-    # family-gate: 非 Pony SDXL base に Pony LoRA を載せると崩壊するので除外
+    # family-gate: ckpt の Pony 有無で LoRA を対称に絞る
+    #   Pony ckpt  → Pony LoRA のみ採用 (非 Pony LoRA を除外)
+    #   非 Pony ckpt → 非 Pony LoRA のみ採用 (Pony LoRA を除外)
     is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
     ckpt_lane = checkpoint_version(checkpoint_path)
-    if loras and ckpt_lane == "sdxl" and not is_pony:
-        dropped = [p.name for p, _ in loras if _is_pony_name(p.stem)]
-        if dropped:
-            loras = [(p, s) for p, s in loras if not _is_pony_name(p.stem)]
-            logs.append(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped)}",
-                          f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped)}"))
+    if loras and ckpt_lane == "sdxl":
+        if is_pony:
+            dropped = [p.name for p, _ in loras if not _is_pony_name(p.stem)]
+            if dropped:
+                loras = [(p, s) for p, s in loras if _is_pony_name(p.stem)]
+                logs.append(L(f"  [family-gate] Pony base → 非 Pony LoRA 除外: {', '.join(dropped)}",
+                              f"  [family-gate] Pony base → dropping non-Pony LoRAs: {', '.join(dropped)}"))
+        else:
+            dropped = [p.name for p, _ in loras if _is_pony_name(p.stem)]
+            if dropped:
+                loras = [(p, s) for p, s in loras if not _is_pony_name(p.stem)]
+                logs.append(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped)}",
+                              f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped)}"))
 
     # quality 前置: 明示 > --pony > family=pony
     explicit_stripped = (explicit_quality_prefix or "").strip()
@@ -1796,10 +1805,10 @@ def main() -> None:
     ap.add_argument("--lora-stack-min", type=int, default=3,
                     help=L("1 枚あたりの重ね掛け LoRA 最小数 (既定 3、1 で「下限 1」)",
                            "minimum number of stacked LoRAs per image (default 3, set 1 for min of 1)"))
-    ap.add_argument("--lora-stack-max", type=int, default=5,
-                    help=L("1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 5、"
+    ap.add_argument("--lora-stack-max", type=int, default=8,
+                    help=L("1 枚あたりの重ね掛け LoRA 最大数 (random.randint(min, max)、既定 8、"
                            "1 で重ね無し、0 で完全 OFF)",
-                           "maximum number of stacked LoRAs per image (random.randint(min, max), default 5, "
+                           "maximum number of stacked LoRAs per image (random.randint(min, max), default 8, "
                            "1 for no stacking, 0 to disable entirely)"))
     ap.add_argument("--upscale", action=argparse.BooleanOptionalAction, default=None,
                     help=L("Real-ESRGAN x4 アップスケール (SDXL=4_9_SDXL_upscaled / SD15=3_9_SD15_upscaled に出力)。"
@@ -1833,6 +1842,9 @@ def main() -> None:
     ap.add_argument("--adetailer-steps", type=int, default=30,
                     help=L("ADetailer 各 detected region のステップ数 (既定 30)",
                            "ADetailer inference steps per detected region (default 30)"))
+    ap.add_argument("--benchmark-yolo", action="store_true",
+                    help=L("yolov8s と yolov8n の時間差を計測するベンチマークモード (両方のモデルを使用します)",
+                           "Benchmark mode to measure the execution time difference between yolov8s and yolov8n (runs both)"))
     ap.add_argument("--sdxl-vae", action=argparse.BooleanOptionalAction, default=True,
                     help=L("SDXL ckpt のとき madebyollin/sdxl-vae-fp16-fix を自動 DL + 使用 (既定 ON)。"
                            "checkpoint 同梱 VAE の round-trip 色シフト (person ADetailer の茶色化) 対策。"
@@ -1874,9 +1886,11 @@ def main() -> None:
                            "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' を前置",
                            "for Pony lineage checkpoints. Prepends "
                            "'score_9, score_8_up, score_7_up, source_anime, rating_explicit' if --quality-prefix is not set"))
-    ap.add_argument("--cooldown", type=float, default=None,
-                    help=L("1 枚生成後の待機秒。既定: GPU 温度 - 50 秒 (温度取れなければ 1.0 秒、--cooldown 0 で OFF)",
-                           "cooldown interval in seconds after each image. Default: GPU temp - 50s (1.0s if temp unavailable, --cooldown 0 to disable)"))
+    ap.add_argument("--cooldown", type=float, default=0.0,
+                    help=L("1 枚生成後の待機秒。既定 0 (OFF — 熱サイクルを避けるためサーマルスロットリングに任せる)。"
+                           "数値を渡すと固定秒数、None で旧来の (GPU 温度 - 50) 秒モード",
+                           "cooldown seconds after each image. Default 0 (OFF — avoid thermal cycling, let throttling handle it). "
+                           "Pass a number for fixed seconds, or None for legacy (GPU temp - 50)s mode"))
     ap.add_argument("--dump-workflow", action="store_true",
                     help=L("投入する API workflow JSON を workflow_dump/ にも保存 (生成は通常通り実行)。"
                            "出力 JSON を ComfyUI WebUI の canvas にドラッグすればグラフを可視化できる",
@@ -1934,6 +1948,8 @@ def main() -> None:
         args.prompt = "sentence"
 
     # アップスケール / ADetailer / Hires Fix 既定 (gear に紐づき、明示で上書き)
+    if args.benchmark_yolo:
+        args.adetailer = True
     if args.upscale is None:
         args.upscale = (args.gear == "high")
     if args.adetailer is None:
@@ -1946,7 +1962,7 @@ def main() -> None:
     print(f"checkpoint pool: {pool_label}  prompt mode: {args.prompt}  "
           f"gear: {args.gear} (steps={steps})  arch: {args.arch}  "
           f"upscale: {args.upscale}  adetailer: {args.adetailer}  "
-          f"hires_fix: {args.hires_fix}")
+          f"hires_fix: {args.hires_fix}" + (f"  benchmark_yolo: ON" if args.benchmark_yolo else ""))
     if args.gear == "high":
         print(L(f"  gear high: SD15/SDXL とも 1 発描き (steps={steps})",
                 f"  gear high: single-pass for both SD15 and SDXL (steps={steps})"))
@@ -2001,17 +2017,48 @@ def main() -> None:
         a = lane_assets[ln]
         print(L(f"  [{ln}] LoRA 候補: {len(a['loras'])} 件 / neg embed: {len(a['neg'])} 件",
                 f"  [{ln}] LoRA candidates: {len(a['loras'])} / neg embed: {len(a['neg'])}"))
-
     # ADetailer モデルを起動時 1 回 resolve (無ければ HF から DL、不可なら無効化)
     face_model = person_model = hand_model = None
     if args.adetailer:
-        face_model    = ensure_adetailer_model(args.adetailer_face_model)
-        hand_model    = ensure_adetailer_model(args.adetailer_hand_model or None)
-        person_model  = ensure_adetailer_model(args.adetailer_person_model or None)
+        if args.benchmark_yolo:
+            face_s = ensure_adetailer_model("bbox/face_yolov8s.pt")
+            face_n = ensure_adetailer_model("bbox/face_yolov8n.pt")
+            face_model = face_s if (face_s and face_n) else None
+            
+            if args.adetailer_hand_model:
+                hand_s = ensure_adetailer_model("bbox/hand_yolov8s.pt")
+                hand_n = ensure_adetailer_model("bbox/hand_yolov8n.pt")
+                hand_model = hand_s if (hand_s and hand_n) else None
+            else:
+                hand_model = None
+                
+            if args.adetailer_person_model:
+                person_s = ensure_adetailer_model("segm/person_yolov8s-seg.pt")
+                person_n = ensure_adetailer_model("segm/person_yolov8n-seg.pt")
+                person_model = person_s if (person_s and person_n) else None
+            else:
+                person_model = None
+        else:
+            def _normalize_yolo_name(name: Optional[str]) -> Optional[str]:
+                if not name:
+                    return None
+                if "/" in name:
+                    return name
+                if name.startswith("person_") or name.endswith("-seg.pt"):
+                    return f"segm/{name}"
+                return f"bbox/{name}"
+            args.adetailer_face_model   = _normalize_yolo_name(args.adetailer_face_model) or args.adetailer_face_model
+            args.adetailer_hand_model   = _normalize_yolo_name(args.adetailer_hand_model) or ""
+            args.adetailer_person_model = _normalize_yolo_name(args.adetailer_person_model) or ""
+            face_model    = ensure_adetailer_model(args.adetailer_face_model)
+            hand_model    = ensure_adetailer_model(args.adetailer_hand_model or None)
+            person_model  = ensure_adetailer_model(args.adetailer_person_model or None)
+        
         if not face_model:
             print(L("  [adetailer][warn] face model が無く DL も不可 → ADetailer 全体を OFF",
                     "  [adetailer][warn] face model missing and download failed → disabling ADetailer entirely"), flush=True)
             args.adetailer = False
+            args.benchmark_yolo = False
 
     # 各版の安定 VAE を起動時 1 回 resolve (DL 失敗時は None で checkpoint 同梱 VAE にフォールバック)
     sdxl_vae_name: Optional[str] = ensure_sdxl_vae_fix() if args.sdxl_vae else None
@@ -2115,8 +2162,20 @@ def main() -> None:
                             continue
                     picked_loras.append((cand, float(strength)))
             elif args.gear == "high" and active["loras"] and args.lora_stack_max > 0:
+                # ckpt の Pony 有無に合わせて LoRA pool を先に絞る (抽選前の family-gate)
+                _is_pony_ckpt = checkpoint_is_pony(checkpoint_path, checkpoint_data)
+                _ckpt_lane = checkpoint_version(checkpoint_path)
+                lora_pool = list(active["loras"])
+                if _ckpt_lane == "sdxl":
+                    if _is_pony_ckpt:
+                        lora_pool = [p for p in lora_pool if _is_pony_name(p.stem)]
+                        gate_label = L("Pony base → Pony LoRA のみ抽選", "Pony base → Pony-only LoRA pool")
+                    else:
+                        lora_pool = [p for p in lora_pool if not _is_pony_name(p.stem)]
+                        gate_label = L("非 Pony base → 非 Pony LoRA のみ抽選", "non-Pony base → non-Pony-only LoRA pool")
+                    print(f"  [family-gate] {gate_label} (pool={len(lora_pool)}/{len(active['loras'])})", flush=True)
                 picked = pick_n_loras_by_keywords(
-                    active["loras"], lora_keywords, active["corpus"],
+                    lora_pool, lora_keywords, active["corpus"],
                     n_max=args.lora_stack_max, n_min=args.lora_stack_min,
                 )
                 if picked:
@@ -2195,147 +2254,207 @@ def main() -> None:
                 print(line)
             ckpt_is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
 
-            workflow_loras = [(p.name, s) for p, s in picked_loras]
-            workflow = build_workflow_txt2img(
-                checkpoint=checkpoint_path.name,
-                positive=positive_augmented, negative=negative_augmented,
-                seed=seed, steps=use_steps, cfg=args.cfg_scale,
-                width=gen_width, height=gen_height,
-                sampler_name=args.sampler, scheduler=args.scheduler,
-                init_image=init_image_name,                          # refine 時: init 画像 (img2img)
-                denoise=(args.refine_denoise if is_refine else 1.0),
-                loras=workflow_loras,
-                controlnet_name=picked_controlnet.name if picked_controlnet else None,
-                controlnet_mode=controlnet_mode,
-                controlnet_image=controlnet_upload_name,
-                controlnet_strength=effective_cn_strength,
-                upscale_model=upscale_model_name,
-                adetailer=args.adetailer,
-                adetailer_face_model=face_model,
-                adetailer_hand_model=hand_model,
-                adetailer_person_model=person_model,
-                adetailer_denoise=args.adetailer_denoise,
-                adetailer_person_denoise=args.adetailer_person_denoise,
-                adetailer_steps=args.adetailer_steps,
-                hires_fix=args.hires_fix, hires_scale=args.hires_scale,
-                hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
-                # SDXL ckpt のときだけ安定 VAE を被せる (SD15 には流用不可)
-                vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else sd15_vae_name,
-            )
-            if args.adetailer:
-                parts = [f"face={face_model}"]
-                if hand_model:
-                    parts.append(f"hand={hand_model}")
-                if person_model:
-                    parts.append(f"person={person_model}@{args.adetailer_person_denoise}")
-                print(f"  ADetailer: {', '.join(parts)}"
-                      f" (denoise={args.adetailer_denoise}, steps={args.adetailer_steps})")
-            if upscale_model_name:
-                print(f"  upscale: {upscale_model_name}")
-
-            if args.dump_workflow or args.dump_only:
-                kind = "refine" if is_refine else f"{ckpt_lane}_single"
-                _dump_workflow(workflow, kind)
-            if args.dump_only:
-                print(L("  [dump-only] ComfyUI への投入はスキップ。"
-                        "上記 JSON を WebUI canvas にドロップしてグラフ確認",
-                        "  [dump-only] skipping ComfyUI submission. "
-                        "Drop the JSON above onto the WebUI canvas to inspect the graph"), flush=True)
-                break
-
-            prompt_id = submit_prompt(workflow, client_id)
-            print(f"  ComfyUI prompt_id: {prompt_id}")
-
-            result = wait_for_completion_ws(prompt_id, client_id)
-
-            outputs = result.get("outputs", {})
-            # node 7 = 通常解像度 (版に応じて 3_8_SD15_generated / 4_8_SDXL_generated)
-            save_node = outputs.get("7", {})
-            images = save_node.get("images", [])
-            if not images:
-                print(L(f"  [warn] 出力画像が見つからない、スキップ",
-                        f"  [warn] output image not found, skipping"))
-                continue
-            img_info = images[0]
-            img_bytes = fetch_image(img_info["filename"],
-                                     img_info.get("subfolder", ""),
-                                     img_info.get("type", "output"))
+            if args.benchmark_yolo:
+                configs = [
+                    {
+                        "suffix": "_yolov8s",
+                        "face": "bbox/face_yolov8s.pt",
+                        "hand": "bbox/hand_yolov8s.pt" if hand_model else None,
+                        "person": "segm/person_yolov8s-seg.pt" if person_model else None,
+                        "label": "yolov8s"
+                    },
+                    {
+                        "suffix": "_yolov8n",
+                        "face": "bbox/face_yolov8n.pt",
+                        "hand": "bbox/hand_yolov8n.pt" if hand_model else None,
+                        "person": "segm/person_yolov8n-seg.pt" if person_model else None,
+                        "label": "yolov8n"
+                    }
+                ]
+            else:
+                configs = [
+                    {
+                        "suffix": "",
+                        "face": face_model,
+                        "hand": hand_model,
+                        "person": person_model,
+                        "label": "standard"
+                    }
+                ]
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            # 出力 dir は ckpt の版で振り分け (SD15=3_8 / SDXL=5_1)
-            gen_dir = SDXL_GENERATED_DIR if ckpt_lane == "sdxl" else SD15_GENERATED_DIR
-            out_path = gen_dir / f"{ts}.png"
-            # 画像の最終解像度 (Hires Fix on のとき base × scale)。メタ Size はここを書く
-            final_w = int(gen_width * args.hires_scale) if args.hires_fix else gen_width
-            final_h = int(gen_height * args.hires_scale) if args.hires_fix else gen_height
-            save_with_a1111_metadata(
-                img_bytes, out_path,
-                positive=positive_augmented, negative=negative_augmented, seed=seed,
-                steps=use_steps, cfg=args.cfg_scale,
-                sampler=args.sampler, scheduler=args.scheduler,
-                width=final_w, height=final_h,
-                checkpoint=checkpoint_path.name,
-                lora_keywords=lora_keywords,
-                loras=[(p.name, s) for p, s in picked_loras],
-                controlnet_name=picked_controlnet.name if picked_controlnet else None,
-                controlnet_mode=controlnet_mode,
-                controlnet_strength=effective_cn_strength,
-                pose_source=pose_png.name if pose_png else None,
-                adetailer=args.adetailer,
-                adetailer_person=bool(person_model) and args.adetailer,
-                pipeline=pipeline_label,
-            )
-            elapsed = time.time() - iter_start
-            total += 1
-            print(f"  → {out_path.name}  {final_w}x{final_h}  ({elapsed:.1f}s)")
+            benchmark_results = {}
+            for cfg_item in configs:
+                cfg_face = cfg_item["face"]
+                cfg_hand = cfg_item["hand"]
+                cfg_person = cfg_item["person"]
+                suffix = cfg_item["suffix"]
+                cfg_label = cfg_item["label"]
+
+                workflow_loras = [(p.name, s) for p, s in picked_loras]
+                workflow = build_workflow_txt2img(
+                    checkpoint=checkpoint_path.name,
+                    positive=positive_augmented, negative=negative_augmented,
+                    seed=seed, steps=use_steps, cfg=args.cfg_scale,
+                    width=gen_width, height=gen_height,
+                    sampler_name=args.sampler, scheduler=args.scheduler,
+                    init_image=init_image_name,                          # refine 時: init 画像 (img2img)
+                    denoise=(args.refine_denoise if is_refine else 1.0),
+                    loras=workflow_loras,
+                    controlnet_name=picked_controlnet.name if picked_controlnet else None,
+                    controlnet_mode=controlnet_mode,
+                    controlnet_image=controlnet_upload_name,
+                    controlnet_strength=effective_cn_strength,
+                    upscale_model=upscale_model_name,
+                    adetailer=args.adetailer,
+                    adetailer_face_model=cfg_face,
+                    adetailer_hand_model=cfg_hand,
+                    adetailer_person_model=cfg_person,
+                    adetailer_denoise=args.adetailer_denoise,
+                    adetailer_person_denoise=args.adetailer_person_denoise,
+                    adetailer_steps=args.adetailer_steps,
+                    hires_fix=args.hires_fix, hires_scale=args.hires_scale,
+                    hires_denoise=args.hires_denoise, hires_steps=args.hires_steps,
+                    # SDXL ckpt のときだけ安定 VAE を被せる (SD15 には流用不可)
+                    vae_override=sdxl_vae_name if ckpt_lane == "sdxl" else sd15_vae_name,
+                )
+                if args.adetailer:
+                    parts = []
+                    if cfg_face: parts.append(f"face={cfg_face}")
+                    if cfg_hand: parts.append(f"hand={cfg_hand}")
+                    if cfg_person: parts.append(f"person={cfg_person}@{args.adetailer_person_denoise}")
+                    print(f"  [{cfg_label}] ADetailer: {', '.join(parts)}"
+                          f" (denoise={args.adetailer_denoise}, steps={args.adetailer_steps})")
+                if upscale_model_name:
+                    print(f"  [{cfg_label}] upscale: {upscale_model_name}")
+
+                if args.dump_workflow or args.dump_only:
+                    kind = "refine" if is_refine else f"{ckpt_lane}_single"
+                    if args.benchmark_yolo:
+                        kind = f"{kind}_{cfg_label}"
+                    _dump_workflow(workflow, kind)
+                if args.dump_only:
+                    print(L(f"  [dump-only] ComfyUI への投入はスキップ ({cfg_label})。上記 JSON を WebUI canvas にドロップしてグラフ確認",
+                            f"  [dump-only] skipping ComfyUI submission ({cfg_label}). Drop the JSON above onto the WebUI canvas to inspect the graph"), flush=True)
+                    stop["flag"] = True
+                    continue
+
+                run_start = time.time()
+                prompt_id = submit_prompt(workflow, client_id)
+                print(f"  ComfyUI prompt_id ({cfg_label}): {prompt_id}")
+
+                result = wait_for_completion_ws(prompt_id, client_id)
+                run_elapsed = time.time() - run_start
+                benchmark_results[cfg_label] = run_elapsed
+
+                outputs = result.get("outputs", {})
+                # node 7 = 通常解像度 (版に応じて 3_8_SD15_generated / 4_8_SDXL_generated)
+                save_node = outputs.get("7", {})
+                images = save_node.get("images", [])
+                if not images:
+                    print(L(f"  [warn] 出力画像が見つからない、スキップ",
+                            f"  [warn] output image not found, skipping"))
+                    continue
+                img_info = images[0]
+                img_bytes = fetch_image(img_info["filename"],
+                                         img_info.get("subfolder", ""),
+                                         img_info.get("type", "output"))
+
+                # 出力 dir は ckpt の版で振り分け (SD15=3_8 / SDXL=5_1)
+                gen_dir = SDXL_GENERATED_DIR if ckpt_lane == "sdxl" else SD15_GENERATED_DIR
+                out_path = gen_dir / f"{ts}{suffix}.png"
+                # 画像の最終解像度 (Hires Fix on のとき base × scale)。メタ Size はここを書く
+                final_w = int(gen_width * args.hires_scale) if args.hires_fix else gen_width
+                final_h = int(gen_height * args.hires_scale) if args.hires_fix else gen_height
+                save_with_a1111_metadata(
+                    img_bytes, out_path,
+                    positive=positive_augmented, negative=negative_augmented, seed=seed,
+                    steps=use_steps, cfg=args.cfg_scale,
+                    sampler=args.sampler, scheduler=args.scheduler,
+                    width=final_w, height=final_h,
+                    checkpoint=checkpoint_path.name,
+                    lora_keywords=lora_keywords,
+                    loras=[(p.name, s) for p, s in picked_loras],
+                    controlnet_name=picked_controlnet.name if picked_controlnet else None,
+                    controlnet_mode=controlnet_mode,
+                    controlnet_strength=effective_cn_strength,
+                    pose_source=pose_png.name if pose_png else None,
+                    adetailer=args.adetailer,
+                    adetailer_person=bool(cfg_person) and args.adetailer,
+                    pipeline=f"{pipeline_label} ({cfg_label})",
+                )
+                print(f"  → {out_path.name}  {final_w}x{final_h}  ({run_elapsed:.1f}s)")
+
+                # node 14 = アップスケール後 (版に応じて 3_9_SD15_upscaled / 4_9_SDXL_upscaled)
+                if upscale_model_name:
+                    up_node = outputs.get("14", {})
+                    up_images = up_node.get("images", [])
+                    if up_images:
+                        up_info = up_images[0]
+                        up_bytes = fetch_image(up_info["filename"],
+                                                up_info.get("subfolder", ""),
+                                                up_info.get("type", "output"))
+                        up_dir = SDXL_UPSCALED_DIR if ckpt_lane == "sdxl" else SD15_UPSCALED_DIR
+                        up_path = up_dir / f"{ts}{suffix}.png"
+                        save_with_a1111_metadata(
+                            up_bytes, up_path,
+                            positive=positive_augmented, negative=negative_augmented, seed=seed,
+                            steps=use_steps, cfg=args.cfg_scale,
+                            sampler=args.sampler, scheduler=args.scheduler,
+                            width=final_w * 4, height=final_h * 4,
+                            checkpoint=checkpoint_path.name,
+                            lora_keywords=lora_keywords,
+                            loras=[(p.name, s) for p, s in picked_loras],
+                            controlnet_name=picked_controlnet.name if picked_controlnet else None,
+                            controlnet_mode=controlnet_mode,
+                            controlnet_strength=effective_cn_strength,
+                            pose_source=pose_png.name if pose_png else None,
+                            adetailer=args.adetailer,
+                            adetailer_person=bool(cfg_person) and args.adetailer,
+                            pipeline=f"{pipeline_label} ({cfg_label})",
+                        )
+                        print(f"      up → {up_dir.name}/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
+                    else:
+                        print(L(f"  [warn] アップスケール出力が見つからない",
+                                f"  [warn] upscaled output not found"))
+
+            if stop["flag"] and args.dump_only:
+                break
+
             if is_refine:
                 stop["flag"] = True  # --png refine は 1 枚で終了 (この後の upscale 保存まではやる)
 
-            # node 14 = アップスケール後 (版に応じて 3_9_SD15_upscaled / 4_9_SDXL_upscaled)
-            if upscale_model_name:
-                up_node = outputs.get("14", {})
-                up_images = up_node.get("images", [])
-                if up_images:
-                    up_info = up_images[0]
-                    up_bytes = fetch_image(up_info["filename"],
-                                            up_info.get("subfolder", ""),
-                                            up_info.get("type", "output"))
-                    up_dir = SDXL_UPSCALED_DIR if ckpt_lane == "sdxl" else SD15_UPSCALED_DIR
-                    up_path = up_dir / f"{ts}.png"
-                    save_with_a1111_metadata(
-                        up_bytes, up_path,
-                        positive=positive_augmented, negative=negative_augmented, seed=seed,
-                        steps=use_steps, cfg=args.cfg_scale,
-                        sampler=args.sampler, scheduler=args.scheduler,
-                        width=final_w * 4, height=final_h * 4,
-                        checkpoint=checkpoint_path.name,
-                        lora_keywords=lora_keywords,
-                        loras=[(p.name, s) for p, s in picked_loras],
-                        controlnet_name=picked_controlnet.name if picked_controlnet else None,
-                        controlnet_mode=controlnet_mode,
-                        controlnet_strength=effective_cn_strength,
-                        pose_source=pose_png.name if pose_png else None,
-                        adetailer=args.adetailer,
-                        adetailer_person=bool(person_model) and args.adetailer,
-                        pipeline=pipeline_label,
-                    )
-                    print(f"      up → {up_dir.name}/{up_path.name}  {gen_width*4}x{gen_height*4} ({upscale_model_name})")
+            elapsed = time.time() - iter_start
+            total += 1
+
+            if args.benchmark_yolo and "yolov8s" in benchmark_results and "yolov8n" in benchmark_results:
+                t_s = benchmark_results["yolov8s"]
+                t_n = benchmark_results["yolov8n"]
+                diff = t_s - t_n
+                pct = (diff / t_s * 100) if t_s > 0 else 0
+                print(f"\n--- YOLOv8 Benchmark Result ---")
+                print(f"  yolov8s: {t_s:.2f}s")
+                print(f"  yolov8n: {t_n:.2f}s")
+                if diff > 0:
+                    print(f"  Time Difference: yolov8n is faster by {diff:.2f}s ({pct:.1f}%)")
                 else:
-                    print(L(f"  [warn] アップスケール出力が見つからない",
-                            f"  [warn] upscaled output not found"))
+                    print(f"  Time Difference: yolov8s is faster by {abs(diff):.2f}s ({abs(pct):.1f}%)")
+                print(f"-------------------------------\n")
 
             # gear high のみ checkpoint.toml の fast/slow を更新 / 新規追記
             # 直前にディスクから再読込してマージ → ユーザが外部エディタで編集中の他フィールドを潰さない
             if args.gear == "high":
-                reload_update_save_checkpoint_toml(checkpoint_path.stem, elapsed, checkpoint_data)
+                elapsed_for_timing = benchmark_results.get("yolov8s", elapsed) if args.benchmark_yolo else elapsed
+                reload_update_save_checkpoint_toml(checkpoint_path.stem, elapsed_for_timing, checkpoint_data)
 
-            # cooldown: --cooldown 明示なら固定、未指定なら (GPU 温度 - 50) 秒、取れなければ 1.0 秒
+            # cooldown: 既定 0 (OFF, 熱サイクル回避)。明示的に数値を渡せば固定、None で旧 (GPU 温度-50) モード
             if not stop["flag"]:
-                if args.cooldown is not None:
-                    wait_s = max(0.0, args.cooldown)
-                else:
+                temp = None
+                if args.cooldown is None:
                     temp = current_gpu_temp()
                     wait_s = max(0.0, float((temp or 51) - 50))
+                else:
+                    wait_s = max(0.0, args.cooldown)
                 if wait_s > 0:
                     if args.cooldown is None and temp is not None:
                         print(L(f"  cooldown: GPU {temp}°C → {wait_s:.0f}s 待機",
