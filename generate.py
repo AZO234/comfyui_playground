@@ -1365,9 +1365,9 @@ def pick_checkpoint(
     if fixed_name:
         return _resolve_checkpoint_name(fixed_name, dirs)
 
-    # multi-lane (SD15+SDXL 両方候補あり) なら 25/75 (SD15/SDXL) で先に版を決める
-    # SDXL 偏重: VAE 安定化 + 1 発描き統一で SDXL が常用となったため (旧 50/50 → 2026-06-13)
-    SD15_LANE_PROB = 0.25
+    # multi-lane (SD15+SDXL 両方候補あり) なら 50/50 (SD15/SDXL) で先に版を決める
+    # 実運用で SD15 がそれほど有利になっていなかったため 25/75 → 50/50 に戻した (2026-06-16)
+    SD15_LANE_PROB = 0.5
     sd15_pool = [c for c in candidates if checkpoint_version(c) == "sd15"]
     sdxl_pool = [c for c in candidates if checkpoint_version(c) == "sdxl"]
     if sd15_pool and sdxl_pool:
@@ -1502,19 +1502,23 @@ def prepare_workflow_prompt(
     # family-gate: ckpt の Pony 有無で LoRA を対称に絞る
     #   Pony ckpt  → Pony LoRA のみ採用 (非 Pony LoRA を除外)
     #   非 Pony ckpt → 非 Pony LoRA のみ採用 (Pony LoRA を除外)
+    # 例外: subject="background"/"scenery"/"landscape" の LoRA は family を問わず通す
     is_pony = checkpoint_is_pony(checkpoint_path, checkpoint_data)
     ckpt_lane = checkpoint_version(checkpoint_path)
+    _SCENE_SUBJECTS = {"background", "scenery", "landscape", "place"}
     if loras and ckpt_lane == "sdxl":
+        def _is_scene(stem: str) -> bool:
+            return subjects.get(stem, "") in _SCENE_SUBJECTS
         if is_pony:
-            dropped = [p.name for p, _ in loras if not _is_pony_name(p.stem)]
+            dropped = [p.name for p, _ in loras if (not _is_pony_name(p.stem)) and (not _is_scene(p.stem))]
             if dropped:
-                loras = [(p, s) for p, s in loras if _is_pony_name(p.stem)]
+                loras = [(p, s) for p, s in loras if _is_pony_name(p.stem) or _is_scene(p.stem)]
                 logs.append(L(f"  [family-gate] Pony base → 非 Pony LoRA 除外: {', '.join(dropped)}",
                               f"  [family-gate] Pony base → dropping non-Pony LoRAs: {', '.join(dropped)}"))
         else:
-            dropped = [p.name for p, _ in loras if _is_pony_name(p.stem)]
+            dropped = [p.name for p, _ in loras if _is_pony_name(p.stem) and (not _is_scene(p.stem))]
             if dropped:
-                loras = [(p, s) for p, s in loras if not _is_pony_name(p.stem)]
+                loras = [(p, s) for p, s in loras if (not _is_pony_name(p.stem)) or _is_scene(p.stem)]
                 logs.append(L(f"  [family-gate] 非 Pony base → Pony LoRA 除外: {', '.join(dropped)}",
                               f"  [family-gate] non-Pony base → dropping Pony LoRAs: {', '.join(dropped)}"))
 
@@ -2163,16 +2167,22 @@ def main() -> None:
                     picked_loras.append((cand, float(strength)))
             elif args.gear == "high" and active["loras"] and args.lora_stack_max > 0:
                 # ckpt の Pony 有無に合わせて LoRA pool を先に絞る (抽選前の family-gate)
+                # 例外: subject="background"/"scenery" の LoRA は背景描画用なので
+                #       人体スタイルの相性問題が出にくく family-gate から免除する
                 _is_pony_ckpt = checkpoint_is_pony(checkpoint_path, checkpoint_data)
                 _ckpt_lane = checkpoint_version(checkpoint_path)
+                _SCENE_SUBJECTS = {"background", "scenery", "landscape", "place"}
                 lora_pool = list(active["loras"])
                 if _ckpt_lane == "sdxl":
+                    def _passes(p: Path) -> bool:
+                        if sdxl_lora_subjects.get(p.stem, "") in _SCENE_SUBJECTS:
+                            return True
+                        return _is_pony_name(p.stem) if _is_pony_ckpt else not _is_pony_name(p.stem)
+                    lora_pool = [p for p in lora_pool if _passes(p)]
                     if _is_pony_ckpt:
-                        lora_pool = [p for p in lora_pool if _is_pony_name(p.stem)]
-                        gate_label = L("Pony base → Pony LoRA のみ抽選", "Pony base → Pony-only LoRA pool")
+                        gate_label = L("Pony base → Pony+背景 LoRA のみ抽選", "Pony base → Pony+scene LoRA pool")
                     else:
-                        lora_pool = [p for p in lora_pool if not _is_pony_name(p.stem)]
-                        gate_label = L("非 Pony base → 非 Pony LoRA のみ抽選", "non-Pony base → non-Pony-only LoRA pool")
+                        gate_label = L("非 Pony base → 非 Pony+背景 LoRA のみ抽選", "non-Pony base → non-Pony+scene LoRA pool")
                     print(f"  [family-gate] {gate_label} (pool={len(lora_pool)}/{len(active['loras'])})", flush=True)
                 picked = pick_n_loras_by_keywords(
                     lora_pool, lora_keywords, active["corpus"],

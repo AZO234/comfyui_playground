@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import subprocess
@@ -50,6 +51,98 @@ LORA_PARAM_TOML = ROOT / "LoRA_param.toml"
 EMPHASIS_RE = re.compile(r"(\*+)([^*]+)\*+")
 # asterisk 数 → compel 重み (markdown の italics/bold/bold-italics に倣う段階表現)
 _EMPHASIS_WEIGHTS = {1: 1.1, 2: 1.3}  # それ以上 (3+) は 1.5 にフォールバック
+
+# 日本語文字判定 (ひらがな / カタカナ / 漢字 / 長音記号)。これを含む文字列だけ Gemma に投げる。
+_JP_CHARS_RE = re.compile(r"[ぁ-んァ-ヴ一-龯々ー]")
+
+# --------------------------------------------------------------------------- #
+# Live Gemma 翻訳 (Ollama 経由)
+# --------------------------------------------------------------------------- #
+# prompt.toml / preview_settings.toml の各エントリは日本語で書く。生成時に
+# build_prompt() が JA → EN (danbooru タグ) を Ollama 上の Gemma に投げて、
+# SDXL/SD15 には英語が流れる。キャッシュなし: 同シードを望まないのと同様、
+# 翻訳の揺らぎも生成多様性として扱う方針 (2026-06-19)。
+OLLAMA_URL_DEFAULT   = "http://localhost:11434"
+OLLAMA_MODEL_DEFAULT = "gemma2:2b"
+
+# system prompt: danbooru タグ風出力を強制する few-shot
+_TRANSLATE_SYSTEM_PROMPT = """You translate Japanese prompts for an anime image generator (SDXL / SD1.5) into English danbooru-style tags.
+
+Rules:
+- Output ONLY the translated tag list. No explanations, no quotes, no markdown fences.
+- Use comma-separated danbooru tags, lowercase ("1girl", "2girls", "nude", "kissing", "lingerie", etc).
+- Preserve emphasis: if the input is wrapped in **double asterisks**, the output must also be wrapped in **double asterisks**.
+- For Japanese counts of people: use "1girl" / "2girls" / "3girls" / "1lady" / "2ladies" etc.
+- Keep wording short and direct, as if writing booru tags. Do NOT add atmosphere or quality tags.
+- If the Japanese already contains English, keep it.
+
+Examples:
+Input:  **1〜2人の少女**
+Output: **1girl, 2girls**
+
+Input:  **1〜2人の裸の少女**
+Output: **1girl, 2girls, nude**
+
+Input:  **2人の少女がキスしている**
+Output: **2girls are kissing**
+
+Input:  色付きランジェリー
+Output: colored lingerie
+
+Input:  プールサイド
+Output: pool side
+
+Input:  女性1人、全身、服を着て、立っている、こちらを見ている、シンプルな背景
+Output: 1lady, solo, full body, weared, standing, looking at viewer, simple background
+"""
+
+
+def is_japanese(text: str) -> bool:
+    """日本語文字 (ひらがな/カタカナ/漢字/長音) を 1 字でも含めば True。"""
+    return bool(_JP_CHARS_RE.search(text or ""))
+
+
+def _ollama_url() -> str:
+    return os.environ.get("OLLAMA_URL") or OLLAMA_URL_DEFAULT
+
+
+def _ollama_model() -> str:
+    return os.environ.get("OLLAMA_MODEL") or OLLAMA_MODEL_DEFAULT
+
+
+def translate_ja_to_en(text: str, *, timeout: float = 30.0) -> str:
+    """1 文字列を JA → EN (danbooru タグ) 訳。
+
+    - JA を含まない (純英語、空白、記号のみ) ならそのまま返す
+    - Ollama 接続 / 応答失敗時は warning を出し、JA をそのまま返す (フォールバック)
+    - キャッシュなし。同じ入力でも呼ぶたびに少しずつ揺らぐ (生成多様性として扱う)
+    """
+    if not text or not is_japanese(text):
+        return text
+    try:
+        import requests  # 遅延 import: dist_tensors 等 requests 不要パスを軽く保つ
+        payload = {
+            "model": _ollama_model(),
+            "prompt": text,
+            "system": _TRANSLATE_SYSTEM_PROMPT,
+            "stream": False,
+            "options": {
+                "temperature": 0.6,   # キャッシュ無しなので揺らぎを許容
+                "num_predict": 200,
+            },
+        }
+        r = requests.post(f"{_ollama_url()}/api/generate", json=payload, timeout=timeout)
+        r.raise_for_status()
+        out = (r.json().get("response") or "").strip()
+        # コードブロックや前置きが付くケースを軽く除去
+        out = out.strip("`").strip()
+        if "\n" in out:
+            out = out.splitlines()[0].strip()
+        return out or text
+    except Exception as e:
+        print(L(f"  [translate][warn] Ollama 失敗 → JA をそのまま使用: {e}",
+                f"  [translate][warn] Ollama failed → using JA as-is: {e}"), flush=True)
+        return text
 
 
 # fp16 で読んだ場合のおおよその常駐サイズ (GB)。アクティベーション余裕 1.5GB を別途見込む
@@ -204,7 +297,7 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
             elif len(chosen) >= 2:
                 has_motion = bool(chosen[1])
         if char:
-            parts.append(char)
+            parts.append(translate_ja_to_en(char))
         if kw_value:
             lora_keywords.append(kw_value)
 
@@ -214,10 +307,10 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
     if not has_wearing:
         w_entry = _wpick_entry(cfg.get("wearing") or [])
         w = _entry_value(w_entry)
-        if w == "nothing":
+        if w == "何も着ていない" or w == "nothing":
             parts.append("naked")
         elif w:
-            parts.append(f"wearing {w}")
+            parts.append(f"wearing {translate_ja_to_en(w)}")
         kw = _entry_keyword(w_entry)
         if kw:
             lora_keywords.append(kw)
@@ -233,10 +326,10 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
         seen: set[str] = set()
         for ent in entries:
             it = str(ent[0])
-            if not it or it == "nothing" or it in seen:
+            if not it or it in ("何も無し", "nothing") or it in seen:
                 continue
             seen.add(it)
-            parts.append(f"with {it}")
+            parts.append(f"with {translate_ja_to_en(it)}")
             if len(ent) >= 3 and ent[2]:
                 lora_keywords.append(str(ent[2]))
 
@@ -245,7 +338,7 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
         m_entry = _wpick_entry(cfg.get("motion") or [])
         m = _entry_value(m_entry)
         if m:
-            parts.append(m)
+            parts.append(translate_ja_to_en(m))
         kw = _entry_keyword(m_entry)
         if kw:
             lora_keywords.append(kw)
@@ -267,14 +360,14 @@ def build_prompt(cfg: dict) -> tuple[str, str, list[str], bool]:
                     at_kw.append(str(e[2]) if len(e) >= 3 else "")
             if at_pool:
                 idx = random.choices(range(len(at_pool)), weights=at_w, k=1)[0]
-                parts.append(f"at {at_pool[idx]}")
+                parts.append(f"at {translate_ja_to_en(at_pool[idx])}")
                 if at_kw[idx]:
                     lora_keywords.append(at_kw[idx])
 
     # with 明るさ
     lighting_list = cfg.get("lighting") or []
     if lighting_list:
-        parts.append(f"with {random.choice(lighting_list)}")
+        parts.append(f"with {translate_ja_to_en(random.choice(lighting_list))}")
 
     # 必ず付加 (positive)
     pos_always = str(cfg.get("positive_always") or "").strip()

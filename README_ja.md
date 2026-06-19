@@ -65,6 +65,35 @@ $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt
 $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 ```
 
+### Ollama + Gemma（プロンプト日本語化用、任意）
+
+`prompt.toml` / `preview_settings.toml` の各エントリは**日本語**で書き、生成直前に Ollama 上の Gemma で英訳（danbooru タグ）して SDXL/SD15 に流す方式。**キャッシュなし**：同じ日本語でも呼ぶたびに少し揺らぐので、生成シードと同様に多様性として扱う。
+
+Ollama が起動していなければ警告を出して日本語をそのまま流す（→ ほぼ確実に破綻）ので、日本語エントリを使うなら **Ollama 必須**。`prompt.toml` を英語に書き直して使うことも可能（その場合 Ollama 不要）。
+
+```powershell
+# Windows
+winget install Ollama.Ollama
+ollama serve            # 別シェルで起動しっぱなしにする
+ollama pull gemma2:2b   # 初回のみ DL（約 1.6 GB）
+```
+
+```bash
+# Linux/macOS
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &
+ollama pull gemma2:2b
+```
+
+環境変数で URL / モデルを差し替え可能：
+
+```
+OLLAMA_URL=http://localhost:11434   # 既定
+OLLAMA_MODEL=gemma2:2b              # 既定。品質を上げたければ gemma2:9b 等
+```
+
+性能の目安：`gemma2:2b` で 1 生成あたり翻訳 +2〜7 秒（who/wearing/with×3/motion/at/lighting で最大 7 回呼び出し）。
+
 ## ディレクトリ構成
 
 - `./` : スクリプト・設定ファイル
@@ -115,7 +144,7 @@ python generate.py --sentence "a girl walking with umbrella in outside"
 ```mermaid
 flowchart TD
   P["プロンプト取得<br/>--prompt auto / sentence / png / original"]
-  P --> CK["checkpoint 抽選<br/>プール = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: 先に 25/75 (SD15/SDXL) で版を抽選 →<br/>版内で重み付き抽選<br/>重み = checkpoint.toml (slow/fast/like)"]
+  P --> CK["checkpoint 抽選<br/>プール = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: 先に 50/50 (SD15/SDXL) で版を抽選 →<br/>版内で重み付き抽選<br/>重み = checkpoint.toml (slow/fast/like)"]
   CK --> V{"当選 checkpoint の版<br/>(置き場 dir)"}
 
   V -->|"SD15"| S1["SD15 1 発描き<br/>VAE 差し替え: sd-vae-ft-mse"]
@@ -136,7 +165,7 @@ flowchart TD
 
 要点だけ言葉にすると:
 
-- **checkpoint は版を意識した抽選**: `--version auto` のときは **25/75** (SD15/SDXL) で先に版を決め、版内で `checkpoint.toml` の fast/slow/like を重みに抽選する。`--version sdxl` / `--version sd15` で固定すれば版指定。
+- **checkpoint は版を意識した抽選**: `--version auto` のときは **50/50** (SD15/SDXL) で先に版を決め、版内で `checkpoint.toml` の fast/slow/like を重みに抽選する。`--version sdxl` / `--version sd15` で固定すれば版指定。
 - **SD15 / SDXL とも 1 発描き** (2026-06-13 に旧 2 段チェーン SD15 下書き→SDXL 清書 は撤回)。出力 PNG とアップスケール PNG は版別 dir に書き出す。
 - **各版とも安定 VAE を初回起動時に自動 DL** して使う (SDXL → `madebyollin/sdxl-vae-fp16-fix`、SD15 → `stabilityai/sd-vae-ft-mse-original`)。checkpoint 同梱 VAE の色シフトや fp16 オーバーフローによる劣化を回避する。
 - **`family` ゲートは CLI / GUI 共通**で適用される (`prepare_workflow_prompt` ヘルパに集約)。Pony checkpoint は score 前置 + Pony neg embed (上限 3) を通し、非 Pony base は Pony LoRA / Pony neg embed を全て除外する。
@@ -352,13 +381,13 @@ SD15 / SDXL とも当選した版で 1 発描き（2026-06-13 に旧 2 段チェ
 
 `--version` は checkpoint の抽選プールを絞り込み、当選した版で 1 発描きする。
 
-`--version auto` ： SD15（`3_1`）+ SDXL（`4_1`）を統合プールとして扱い、**先に 25/75 (SD15/SDXL) で版を抽選**してから版内で `checkpoint.toml` の重みで抽選する（既定）。
+`--version auto` ： SD15（`3_1`）+ SDXL（`4_1`）を統合プールとして扱い、**先に 50/50 (SD15/SDXL) で版を抽選**してから版内で `checkpoint.toml` の重みで抽選する（既定）。
 `--version sdxl` ： `4_1` SDXL のみを抽選。
 `--version sd15` ： `3_1` SD15 のみを抽選。
 
 `--version auto` が規定。
 
-統合プールの重みは**版内**で `checkpoint.toml` の値を見るので、SD15 / SDXL 間の fast/slow スケール差で偏ることはない（旧版は横断 max_slow で偏っていたが 2026-06-13 修正）。SDXL 偏重の 25/75 にしているのは VAE 安定化 + 1 発描き統一で SDXL が常用となったため。確率を変えたいときは `pick_checkpoint` 内 `SD15_LANE_PROB` を編集する。
+統合プールの重みは**版内**で `checkpoint.toml` の値を見るので、SD15 / SDXL 間の fast/slow スケール差で偏ることはない（旧版は横断 max_slow で偏っていたが 2026-06-13 修正）。版抽選は 50/50。一時的に 25/75 (SDXL 偏重) にしていたが、実運用で SD15 がそれほど支配的にならなかったので 2026-06-16 に 50/50 に戻した。確率を変えたいときは `pick_checkpoint` 内 `SD15_LANE_PROB` を編集する。
 
 解像度の既定は版に追従する（SD15=512 / SDXL=1024、横長 many は SD15=768×512 / SDXL=1216×832）。
 `--width` / `--height` / `--many-width` / `--many-height` で上書き可能。

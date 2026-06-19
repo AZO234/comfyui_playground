@@ -1250,12 +1250,12 @@ class GenerateGUI:
             # チェックポイントが「ランダム」なら毎枚抽選し、version / pool を再決定
             if ckpt_random:
                 # SD15/SDXL/混合 ラジオで絞った候補のみから抽選
-                # 混合のときは generate.pick_checkpoint と同じく 25/75 (SD15/SDXL) で先に版を決める
+                # 混合のときは generate.pick_checkpoint と同じく 50/50 (SD15/SDXL) で先に版を決める
                 random_pool = params.get("checkpoint_random_pool") or self.checkpoints
                 sd15_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sd15"]
                 sdxl_sub = [p for p in random_pool if VERSION_BY_DIR.get(p.parent) == "sdxl"]
                 if sd15_sub and sdxl_sub:
-                    lane_pool = sd15_sub if random.random() < 0.25 else sdxl_sub
+                    lane_pool = sd15_sub if random.random() < 0.5 else sdxl_sub
                 else:
                     lane_pool = random_pool
                 this_ckpt = random.choice(lane_pool)

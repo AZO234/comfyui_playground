@@ -3,99 +3,85 @@
 # 重み付き選択は random.choices、均等選択は random.choice。
 # `**word**` 等の強調記法は最終的に normalize_emphasis で `(word:1.3)` 形式に変換される。
 #
+# 第 1 要素は **日本語** で記述。生成直前に prompt_translations.toml の [entries] から
+# 英訳 (danbooru タグ) を引き、SDXL/SD15 には英語が流れる。未訳エントリは translate_prompt.py
+# (Ollama + Gemma) で一括翻訳できる。LoRA キーワード列 (タプル末尾)、positive_always、
+# negative_always、lighting (短い英タグのみ) はそのまま英語を保持する場合もある。
+#
 # 各セクションのエントリは末尾に **LoRA キーワード** (カンマ区切り) を追加できる:
-#   who         : [character, weight, has_wearing, has_motion?, has_where?, many?, kw?]   (v05)
+#   who         : [character_ja, weight, has_wearing, has_motion?, has_where?, many?, kw?]   (v05)
 #                  ※ index 1 が int weight。旧 v01-v04 形式 (weight 無し) も自動判別で互換。
-#   wearing     : [clothing, weight, kw?]
-#   with_items  : [item, weight, kw?]
-#   motion      : [motion, weight, kw?]
-#   at          : "place" (str、weight=1 デフォルト) または [place, weight, kw?]
+#   wearing     : [clothing_ja, weight, kw?]
+#   with_items  : [item_ja, weight, kw?]
+#   motion      : [motion_ja, weight, kw?]
+#   at          : "place_ja" (str、weight=1 デフォルト) または [place_ja, weight, kw?]
 # 採用されたエントリの kw を全部集めて、生成のたびに pick_lora_by_keywords で:
 #   - 97% : LoRA 名 (stem) に kw が部分一致するものから抽選
 #   - 3%  : 全 LoRA からランダム抽選 (= マッチを意図的に避ける)
 # kw 列を省略した既存エントリ ([value, weight] のみ) は従来抽選にフォールバック。
 
-# 誰が: [character, has_wearing, has_motion, has_where, many, lora_keywords]
+# 誰が: [character_ja, weight, has_wearing, has_motion, has_where, many, lora_keywords]
 # - has_wearing=true → 下の [wearing] 抽選をスキップ
-#                      (キャラに服装情報が内包されている前提、例: "school wear girl" / "naked girl")
+#                      (キャラに服装情報が内包されている前提、例: "学生服姿の少女" / "裸の少女")
 # - has_motion=true → 下の [motion] セクションをスキップ (キャラ文字列に動作が内包されている)
-# - has_where=true  → 下の [at] セクションをスキップ
-#                      (キャラ文字列に場所が内包されている前提、例:
-#                       "a girl ware swimsuit at pool" / "a girl ware swimsuit in sea")
-# - many=true       → 複数人エントリ (キャラ文字列が "2 women" 等)。生成側が横長キャンバス
-#                      (--many-width x --many-height、既定 1216x832) に切替えて人物融合を抑える
-# - 後方互換 (index4 の 型 bool/str で v04/v03 を判別):
-#     5 要素 [char, has_wearing, has_motion, has_where, kw_str]   … v03 形式 (index4=str、many=false)
-#     4 要素 [char, has_wearing, has_motion, kw_str]              … v02 形式 (has_where=false)
-#     3 要素 [char, has_motion, kw_str]                           … 旧 v01 形式 (kw のみ、bool は has_motion 扱い)
-# 例: ["**2 women kissing**", false, true, false, true, "kiss"]
-#      ← many=true で横長化、wearing スキップ
-# 例: ["**a girl ware swimsuit at pool**", false, true, true, false, "swimsuit, pool"]
-#      ← wearing スキップ + at スキップ、単独人物
-# 例: ["**a girl**", false, false, false, false, ""]
-#      ← 服装も場所もニュートラル、全セクション通常抽選
-# 1 つを均等ランダム抽選
+# - has_where=true  → 下の [at] セクションをスキップ (キャラ文字列に場所が内包されている)
+# - many=true       → 複数人エントリ。生成側が横長キャンバス (--many-width x --many-height、既定 1216x832) に切替えて人物融合を抑える
+# 1 つを重み付き抽選
 who = [
     # plane
-    ["**1girl or 2girls**", 20, false, false, false, true, ""],
+    ["**1〜2人の少女**", 20, false, false, false, true, ""],
 ]
 
-# 何を着て: [clothing, weight] または [clothing, weight, lora_keywords]
-# 例: ["swimsuit", 5, "swimsuit"]
-# - "nothing" → "naked" を 1 句として追加 (= 裸を明示)
+# 何を着て: [clothing_ja, weight] または [clothing_ja, weight, lora_keywords]
+# - "何も着ていない" → 英訳は "nothing" → "naked" を 1 句として追加 (= 裸を明示)
 # - その他 → "wearing {clothing}" を 1 句として追加
 # 1 つを重み抽選
 wearing = [
-    ["nothing", 30, "naked"],
-    ["dress", 30, "dress"],
-    ["lingerie", 30, "lingerie"],
-    ["panty", 30, "panty"],
-    ["swimsuit", 30, "swimsuit"],
+    ["何も着ていない", 20, "naked"],
+    ["色付きランジェリー", 20, "lingerie"],
+    ["色付きシースルー服", 20, "see through"],
+    ["ドレス", 20, "dress"],
+    ["色付き水着", 10, "swimsuit"],
 ]
 
-# with アクセサリ/状況: [item, weight] または [item, weight, lora_keywords]
-# 例: ["jewelry", 5, "jewelry"]
-# - 最大 3 回 重み抽選 (with replacement)、重複は dedupe、"nothing" は無視
+# with アクセサリ/状況: [item_ja, weight] または [item_ja, weight, lora_keywords]
+# - 最大 3 回 重み抽選 (with replacement)、重複は dedupe、"何も無し" は無視
 # - 採用された各 item は "with {item}" として個別句に展開される
 # - 採用された entry の kw もそれぞれ LoRA キーワードに加わる
 with_items = [
-    ["nothing", 70, ""],
-    ["jewely", 5, "jewel"],
-    ["necklace", 5, "jewel"],
-    ["ear piace", 5, "jewel"],
+    ["何も無し", 50, ""],
+    ["宝飾", 5, "jewel"],
 ]
 
-# 動作: [motion, weight] または [motion, weight, lora_keywords]
-# 例: ["riding bike", 5, "bike"]
+# 動作: [motion_ja, weight] または [motion_ja, weight, lora_keywords]
 # - who.has_motion=true のときはスキップ
 # 1 つを重み抽選
 motion = [
-    ["standing", 50, ""],
-    ["squating", 50, "squat"],
-    ["sitting", 50, ""],
-    ["leaning", 50, ""],
-    ["standing turn their back", 20, ""],
-    ["sitting turn their back", 20, ""],
-    ["lying", 20, ""],
+    ["立っている", 50, ""],
+    ["しゃがんでいる", 50, ""],
+    ["座っている", 50, ""],
+    ["横たわっている", 20, ""],
 ]
 
-# at 場所: 1 つを均等ランダム抽選、"at {place}" 形式
+# at 場所: 1 つを重み抽選、"at {place}" 形式
 at = [
-    ["room", 30, ""],
-    ["beach", 5, ""],
-    ["on cauch", 10, ""],
-    ["rooms bed", 10, ""],
-    ["bathroom", 5, ""],
+    ["部屋", 50, ""],
+    ["ビーチ", 5, ""],
+    ["ソファの上", 10, ""],
+    ["部屋のベッド", 10, ""],
+    ["ホテルのベッド", 10, ""],
+    ["浴室", 5, ""],
 ]
 
 # with 明るさ・情景: 1 つを均等ランダム抽選、"with {lighting}" 形式
 lighting = [
-    "white lighting",
-    "color lighting",
+    "昼の照明",
+    "白い照明",
+    "色付き照明",
 ]
 
-# 必ず prompt 末尾に付加
-positive_always = "natural color, score_9, score_8, score_7"
+# 必ず prompt 末尾に付加 (英語、translate 対象外)
+positive_always = "natural color, score_9, score_8, score_7, exciting facial expression, large breast, try to include as much of the body as possible in the frame."
 
-# 必ず negative_prompt の本体になる (build_prompt は negative も返す)
-negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated, don't water come out of hands, don't water come out of dildos."
+# 必ず negative_prompt の本体になる (英語、translate 対象外)
+negative_always = "synthesis body, lowres, bad anatomy, worst quality, extra hand, joined hips, not 5-fingers, malformed body, diffrent faces upper body and under body, malformed feet, extra feet, missing feet, deformed limbs, duplicate, clone, repeated, collage, panels, grid, tiling, seamless pattern, complementary colors, duotone, two-tone, color grading, oversaturated"

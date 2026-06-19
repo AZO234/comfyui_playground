@@ -68,6 +68,35 @@ $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt
 $ pip install -r ComfyUI/custom_nodes/ComfyUI-Impact-Subpack/requirements.txt
 ```
 
+### Ollama + Gemma (for Japanese prompts, optional)
+
+Each entry in `prompt.toml` / `preview_settings.toml` is written in **Japanese**; right before generation, Ollama running Gemma translates it to English (danbooru tags) and that English is fed to SDXL/SD15. **No cache**: even the same Japanese will drift a little each call — treat the translation variance as part of generation variance, same idea as not pinning seeds.
+
+If Ollama is not running, a warning is printed and the Japanese is passed through as-is (which will almost certainly break generation). So if you keep the entries in Japanese, **Ollama is required**. Rewriting `prompt.toml` back to English also works (no Ollama needed in that case).
+
+```powershell
+# Windows
+winget install Ollama.Ollama
+ollama serve            # keep running in a separate shell
+ollama pull gemma2:2b   # one-time download (~1.6 GB)
+```
+
+```bash
+# Linux/macOS
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &
+ollama pull gemma2:2b
+```
+
+Override URL / model via env vars:
+
+```
+OLLAMA_URL=http://localhost:11434   # default
+OLLAMA_MODEL=gemma2:2b              # default; for higher quality try gemma2:9b
+```
+
+Rough cost: with `gemma2:2b` the per-image translation adds 2–7 s (up to 7 calls per image: who / wearing / with×3 / motion / at / lighting).
+
 ## Directory Layout
 
 - `./` : Scripts and configuration files
@@ -118,7 +147,7 @@ A single image from `generate.py` roughly follows the flow below (terms are deta
 ```mermaid
 flowchart TD
   P["Get prompt<br/>--prompt auto / sentence / png / original"]
-  P --> CK["Checkpoint draw<br/>pool = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: pick lane 25/75 (SD15/SDXL) first,<br/>then weighted within lane<br/>weight = checkpoint.toml (slow/fast/like)"]
+  P --> CK["Checkpoint draw<br/>pool = --version (auto:3_1+4_1 / sd15 / sdxl)<br/>auto: pick lane 50/50 (SD15/SDXL) first,<br/>then weighted within lane<br/>weight = checkpoint.toml (slow/fast/like)"]
   CK --> V{"Version of the drawn checkpoint<br/>(its directory)"}
 
   V -->|"SD15"| S1["SD15 single pass<br/>VAE override: sd-vae-ft-mse"]
@@ -358,7 +387,7 @@ You do not need to think about SD15 vs. SDXL; just choose "rough (low)" or "fini
 
 `--version auto` is the default.
 
-The within-lane weight reads `checkpoint.toml` separately for SD15 and SDXL, so the fast/slow scale difference between lanes no longer biases the draw (this was a known bug in the cross-lane `max_slow` weighting before 2026-06-13). The 25/75 SDXL-heavy split exists because the VAE override + single-pass unification made SDXL the everyday choice. Change `SD15_LANE_PROB` in `pick_checkpoint` to adjust.
+The within-lane weight reads `checkpoint.toml` separately for SD15 and SDXL, so the fast/slow scale difference between lanes no longer biases the draw (this was a known bug in the cross-lane `max_slow` weighting before 2026-06-13). The lane split is 50/50 (SD15/SDXL) — briefly 25/75 during the SDXL-only push, restored to 50/50 on 2026-06-16 after SD15 didn't turn out as dominant in practice as feared. Change `SD15_LANE_PROB` in `pick_checkpoint` to adjust.
 
 Resolution defaults follow the version (SD15 = 512 / SDXL = 1024; landscape `many` is SD15 = 768×512 / SDXL = 1216×832).
 Override with `--width` / `--height` / `--many-width` / `--many-height`.

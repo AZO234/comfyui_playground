@@ -224,10 +224,14 @@ def load_negative() -> str:
 
 
 def build_positive(base_positive: str, family: str, trigger: str = "") -> str:
+    # preview_settings.toml 上の base_positive は日本語で書かれているので、
+    # 生成直前に Ollama (Gemma) で英訳する。Ollama 接続失敗時は JA をそのまま返す。
+    from common import translate_ja_to_en
+    base_en = translate_ja_to_en(base_positive)
     parts = []
     if family == "pony":               # Pony 系ベースには score 前置
         parts.append(PONY_SCORE_PREFIX)
-    parts.append(base_positive)
+    parts.append(base_en)
     if trigger:
         parts.append(trigger)
     return ", ".join(parts)
